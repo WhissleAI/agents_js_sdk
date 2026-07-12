@@ -158,7 +158,13 @@ export class WhissleAgent {
           onUserTranscript: (data: { text: string; final?: boolean }) => {
             if (data.final) this.emit("user-transcript", data.text);
           },
-          onBotOutput: (data: { text: string }) => this.emit("agent-transcript", data.text),
+          onBotOutput: (data: { text: string; spoken_status?: string }) => {
+            // onBotOutput streams a segment through new → in-progress →
+            // completed. Emit once, when it's done, so a line isn't rendered
+            // multiple times (older protocols omit spoken_status — emit as-is).
+            if (data.spoken_status && data.spoken_status !== "completed") return;
+            this.emit("agent-transcript", data.text);
+          },
           onServerMessage: (data: unknown) => {
             const msg = data as { type?: string; error?: string; message?: string };
             if (msg?.type === "error" && msg?.error === "no_credits") {
