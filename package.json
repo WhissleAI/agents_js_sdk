@@ -1,0 +1,38 @@
+{
+  "name": "@whissle/agents",
+  "version": "0.1.0",
+  "description": "Embed a Whissle voice agent into any web app. Create/configure the agent on platform.whissle.ai, then run a live conversation with a publishable key.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "unpkg": "./dist/index.global.js",
+  "jsdelivr": "./dist/index.global.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": ["whissle", "voice", "agent", "webrtc", "ai", "widget", "embed", "sdk"],
+  "dependencies": {
+    "@pipecat-ai/client-js": "^1.9.1",
+    "@pipecat-ai/small-webrtc-transport": "^1.10.2"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WhissleAI/agents_js_sdk.git"
+  }
+}
