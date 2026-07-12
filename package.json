@@ -16,20 +16,34 @@
       "require": "./dist/index.cjs"
     }
   },
-  "files": ["dist", "README.md"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit"
   },
-  "keywords": ["whissle", "voice", "agent", "webrtc", "ai", "widget", "embed", "sdk"],
+  "keywords": [
+    "whissle",
+    "voice",
+    "agent",
+    "webrtc",
+    "ai",
+    "widget",
+    "embed",
+    "sdk"
+  ],
   "dependencies": {
     "@pipecat-ai/client-js": "^1.9.1",
     "@pipecat-ai/small-webrtc-transport": "^1.10.2"
   },
   "devDependencies": {
+    "events": "^3.3.0",
     "tsup": "^8.0.0",
-    "typescript": "^5.4.0"
+    "typescript": "^5.4.0",
+    "util": "^0.12.5"
   },
   "repository": {
     "type": "git",
