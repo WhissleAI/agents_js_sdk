@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Whissle agent — embed example</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 0; background: #f5f7f4; color: #14201a; }
+      main { max-width: 460px; margin: 6vh auto; padding: 0 20px; }
+      h1 { font-size: 20px; }
+      p { color: #55625a; font-size: 14px; }
+      #assistant { height: 520px; margin-top: 16px; }
+      code { background: #eef2ec; padding: 1px 5px; border-radius: 4px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Talk to the agent</h1>
+      <p>
+        This is a plain HTML page — no build step. Replace <code>apiKey</code> and
+        <code>agentId</code> with your own from platform.whissle.ai → the agent's
+        <b>Embed &amp; SDK</b> tab.
+      </p>
+      <div id="assistant"></div>
+    </main>
+
+    <!-- Local build; swap for https://unpkg.com/@whissle/agents in production. -->
+    <script src="../dist/index.global.js"></script>
+    <script>
+      WhissleAgents.mount("#assistant", {
+        apiKey: "wpk_your_publishable_key",
+        agentId: "your-agent-id",
+        title: "AI Tutor",
+      });
+    </script>
+  </body>
+</html>
