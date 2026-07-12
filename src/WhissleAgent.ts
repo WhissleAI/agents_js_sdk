@@ -95,8 +95,11 @@ export class WhissleAgent {
       credentials: "omit",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        // The publishable key. The platform resolves the agent + org + origin.
-        embed_key: this.opts.apiKey,
+        // A publishable key (wpk_) resolves the org; agent_id picks the agent.
+        // A per-agent embed key (wek_) is accepted too, for convenience.
+        ...(this.opts.apiKey.startsWith("wek_")
+          ? { embed_key: this.opts.apiKey }
+          : { api_key: this.opts.apiKey }),
         agent_id: this.opts.agentId,
         parent_origin: typeof location !== "undefined" ? location.origin : undefined,
       }),
