@@ -1,7 +1,7 @@
 import { PipecatClient } from "@pipecat-ai/client-js";
 import { SmallWebRTCTransport } from "@pipecat-ai/small-webrtc-transport";
 
-const DEFAULT_BASE_URL = "https://gateway-backend.whissle.ai/bot";
+const DEFAULT_BASE_URL = "https://aws-gateway-backend.whissle.ai/bot";
 const DEFAULT_ICE = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
@@ -52,6 +52,11 @@ export class WhissleAgent {
   private audioEl: HTMLAudioElement | null = null;
   private handlers = new Map<WhissleEvent, Set<Handler>>();
   private _state: "idle" | "connecting" | "connected" = "idle";
+  // Accumulates the agent's bot-output segments for the CURRENT turn. The backend
+  // (pipecat) emits one bot-output per aggregated sentence, so a multi-sentence
+  // reply arrives as several segments; we buffer them and emit ONE agent-transcript
+  // per turn (flushed when the bot stops speaking) instead of one per sentence.
+  private _botTurn = "";
 
   constructor(options: WhissleAgentOptions) {
     if (!options?.apiKey) throw new Error("WhissleAgent: `apiKey` is required.");
@@ -144,8 +149,17 @@ export class WhissleAgent {
             this._state = "idle";
             this.emit("disconnected");
           },
-          onBotStartedSpeaking: () => this.emit("speaking-started"),
-          onBotStoppedSpeaking: () => this.emit("speaking-stopped"),
+          onBotStartedSpeaking: () => {
+            this._botTurn = ""; // new turn — start a fresh transcript buffer
+            this.emit("speaking-started");
+          },
+          onBotStoppedSpeaking: () => {
+            // Flush the whole turn's text as a single agent-transcript, once.
+            const text = this._botTurn.trim();
+            this._botTurn = "";
+            if (text) this.emit("agent-transcript", text);
+            this.emit("speaking-stopped");
+          },
           onTrackStarted: (track: MediaStreamTrack, participant?: { local?: boolean }) => {
             if (participant?.local) return;
             if (track.kind === "audio" && this.audioEl) {
@@ -158,12 +172,14 @@ export class WhissleAgent {
           onUserTranscript: (data: { text: string; final?: boolean }) => {
             if (data.final) this.emit("user-transcript", data.text);
           },
-          onBotOutput: (data: { text: string; spoken_status?: string }) => {
-            // onBotOutput streams a segment through new → in-progress →
-            // completed. Emit once, when it's done, so a line isn't rendered
-            // multiple times (older protocols omit spoken_status — emit as-is).
-            if (data.spoken_status && data.spoken_status !== "completed") return;
-            this.emit("agent-transcript", data.text);
+          onBotOutput: (data: { text?: string }) => {
+            // The backend emits one bot-output per aggregated SENTENCE of the
+            // reply. Buffer the segments and let onBotStoppedSpeaking emit a single
+            // agent-transcript for the turn — otherwise each sentence renders as its
+            // own bubble. (The previous guard keyed on `spoken_status`, a field this
+            // backend never sends, so it never fired and every segment was emitted.)
+            const seg = (data?.text ?? "").trim();
+            if (seg) this._botTurn = this._botTurn ? `${this._botTurn} ${seg}` : seg;
           },
           onServerMessage: (data: unknown) => {
             const msg = data as { type?: string; error?: string; message?: string };
