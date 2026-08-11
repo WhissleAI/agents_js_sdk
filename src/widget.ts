@@ -1,3 +1,4 @@
+import { normalizeAvatar } from "./avatar";
 import { WhissleAgent, type WhissleAgentOptions } from "./WhissleAgent";
 
 export interface WidgetOptions extends WhissleAgentOptions {
@@ -13,6 +14,8 @@ const CSS = `
 .wa-hd{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid #eef2ec;font-size:14px;font-weight:600}
 .wa-dot{width:8px;height:8px;border-radius:50%;background:#c4cfbe}
 .wa-dot.on{background:var(--wa-accent)}
+.wa-face{position:relative;width:100%;aspect-ratio:1/1;max-height:52%;background:#0d1310;overflow:hidden;flex:0 0 auto}
+.wa-face video{width:100%;height:100%;object-fit:cover;display:block}
 .wa-log{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:8px;font-size:14px;line-height:1.45}
 .wa-msg{max-width:85%;padding:8px 11px;border-radius:12px;white-space:pre-wrap;word-break:break-word}
 .wa-user{align-self:flex-end;background:var(--wa-accent);color:#fff;border-bottom-right-radius:4px}
@@ -44,9 +47,14 @@ export function mount(target: string | HTMLElement, options: WidgetOptions): Whi
     document.head.appendChild(s);
   }
 
+  // A widget with an avatar gets a stage for the face; the SDK renders its
+  // <video> into it (see `avatar.container` below) so the caller places nothing.
+  const wantsAvatar = Boolean(options.avatar);
+
   root.innerHTML = `
     <div class="wa-w" style="--wa-accent:${accent}">
       <div class="wa-hd"><span class="wa-dot" data-dot></span><span data-title>${options.title || "Talk to the assistant"}</span></div>
+      ${wantsAvatar ? '<div class="wa-face" data-face></div>' : ""}
       <div class="wa-log" data-log><div class="wa-hint" data-hint>Tap Start and allow your microphone to begin.</div></div>
       <div class="wa-err" data-err style="display:none"></div>
       <div class="wa-ft">
@@ -61,7 +69,13 @@ export function mount(target: string | HTMLElement, options: WidgetOptions): Whi
   const err = $<HTMLDivElement>("[data-err]");
   const startBtn = $<HTMLButtonElement>("[data-start]");
 
-  const agent = new WhissleAgent(options);
+  // Point the avatar at the stage we just rendered, unless the caller named
+  // their own container — their layout wins over ours.
+  const face = wantsAvatar ? $<HTMLDivElement>("[data-face]") : null;
+  const avatar = normalizeAvatar(options.avatar);
+  const agent = new WhissleAgent(
+    face && avatar ? { ...options, avatar: { ...avatar, container: avatar.container ?? face } } : options,
+  );
 
   const addLine = (who: "user" | "agent", text: string) => {
     hint?.remove();
@@ -88,6 +102,11 @@ export function mount(target: string | HTMLElement, options: WidgetOptions): Whi
       startBtn.textContent = "Start";
       startBtn.classList.remove("end");
       startBtn.disabled = false;
+    })
+    .on("avatar-failed", () => {
+      // The conversation is still coming up, audio-only — so take the empty
+      // stage away rather than leaving a black rectangle and no explanation.
+      if (face) face.remove();
     })
     .on("user-transcript", (t) => addLine("user", String(t)))
     .on("agent-transcript", (t) => addLine("agent", String(t)))
