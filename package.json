@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Embed a Whissle voice agent into any web app. Create/configure the agent on platform.whissle.ai, then run a live conversation with a publishable key.",
   "license": "MIT",
+  "author": "Whissle AI <support@whissle.ai>",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -11,19 +12,31 @@
   "jsdelivr": "./dist/index.global.js",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
-    }
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
+  "engines": {
+    "node": ">=18"
+  },
+  "sideEffects": false,
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepack": "npm run build"
   },
   "keywords": [
     "whissle",
@@ -33,8 +46,13 @@
     "ai",
     "widget",
     "embed",
-    "sdk"
+    "sdk",
+    "voice-agents",
+    "conversational-ai"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@pipecat-ai/client-js": "^1.9.1",
     "@pipecat-ai/small-webrtc-transport": "^1.10.2"
@@ -45,8 +63,12 @@
     "typescript": "^5.4.0",
     "util": "^0.12.5"
   },
+  "homepage": "https://github.com/WhissleAI/agents_js_sdk#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/WhissleAI/agents_js_sdk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/WhissleAI/agents_js_sdk/issues"
   }
 }
