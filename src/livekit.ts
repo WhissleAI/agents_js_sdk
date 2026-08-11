@@ -95,7 +95,7 @@ export class LiveKitSession {
   }
 
   /** Publish an RTVI message on the room's reliable data channel. */
-  private send(message: unknown): void {
+  send(message: unknown): void {
     const room = this.room;
     if (!room) return;
     try {
