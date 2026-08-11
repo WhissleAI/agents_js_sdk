@@ -3,7 +3,10 @@
     "target": "ES2020",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    // ES2021.WeakRef is for livekit-client's own .d.ts, which references
+    // FinalizationRegistry. We keep the ES2020 target and check its types for
+    // real (skipLibCheck stays off) rather than skip-checking the dependency.
+    "lib": ["ES2020", "ES2021.WeakRef", "DOM", "DOM.Iterable"],
     "declaration": true,
     "strict": true,
     "esModuleInterop": true,
@@ -11,5 +14,5 @@
     "forceConsistentCasingInFileNames": true,
     "outDir": "dist"
   },
-  "include": ["src"]
+  "include": ["src", "test"]
 }

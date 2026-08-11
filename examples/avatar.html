@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>@whissle/agents — talking avatar</title>
+    <style>
+      body { font: 15px/1.5 system-ui, sans-serif; margin: 0; padding: 32px; background: #f6f7f6; }
+      .wrap { max-width: 420px; margin: 0 auto; }
+      h1 { font-size: 18px; margin: 0 0 4px; }
+      p.sub { color: #667; margin: 0 0 20px; }
+      #assistant { height: 620px; }
+      pre { background: #fff; border: 1px solid #e3e8e4; border-radius: 10px; padding: 10px;
+            font-size: 12px; max-height: 200px; overflow: auto; margin-top: 16px; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Talking avatar</h1>
+      <p class="sub">
+        Session token minted by a server (pass it as <code>?token=…</code>); avatar rendered in
+        this browser, straight from Simli.
+      </p>
+      <div id="assistant"></div>
+      <pre id="log"></pre>
+    </div>
+
+    <!-- The FULL script build: it bundles the avatar + LiveKit renderers. The
+         lean default build (index.global.js) is voice-only and ~1 MB smaller. -->
+    <script src="../dist/index.full.global.js"></script>
+    <script>
+      const params = new URLSearchParams(location.search);
+      const log = (...a) => {
+        document.getElementById("log").textContent += a.join(" ") + "\n";
+        console.log("[demo]", ...a);
+      };
+
+      // Three ways to open a session; the token one keeps every credential on
+      // your server, which is what you want in production.
+      const credentials = params.get("token")
+        ? { sessionToken: params.get("token") }
+        : { apiKey: params.get("key"), agentId: params.get("agent") };
+
+      const agent = WhissleAgents.mount("#assistant", {
+        ...credentials,
+        baseUrl: params.get("base") || undefined,
+        // ?avatar=none for a plain voice session.
+        avatar: params.get("avatar") === "none" ? undefined : params.get("avatar") || "F1-HR",
+        transport: params.get("transport") || undefined,
+        title: "Whissle demo",
+      });
+
+      ["connecting", "connected", "bot-ready", "avatar-ready", "avatar-failed",
+       "disconnected", "error"].forEach((ev) =>
+        agent.on(ev, (p) => log(ev, ev === "avatar-ready" ? `face=${p && p.faceId}` : (p ?? ""))),
+      );
+      agent.on("user-transcript", (t) => log("you:", t));
+      agent.on("agent-transcript", (t) => log("agent:", t));
+    </script>
+  </body>
+</html>
