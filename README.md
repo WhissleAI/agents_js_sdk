@@ -69,7 +69,7 @@ Three shapes are accepted:
 ```ts
 avatar: "F1-HR"                                  // a specific face
 avatar: true                                     // whatever the agent is configured with
-avatar: { id: "M2-TL", container: "#face", required: false, timeoutMs: 15000 }
+avatar: { id: "M2-TL", container: "#face", required: false, timeoutMs: 15000, pacing: true }
 ```
 
 **Avatar codes** come from `GET https://aws-gateway-backend.whissle.ai/bot/api/avatars`:
@@ -82,6 +82,16 @@ never reaches the page) and the page opens its own connection for the video. No
 Whissle node ever transcodes video, and the frames don't make a second trip. The
 agent's speech is mirrored to the face as clean 16 kHz PCM over the session's
 data channel, which is what makes the lip-sync accurate.
+
+**Audio pacing.** The agent's speech does not arrive at the rate it is spoken —
+it shares an output queue with the WebRTC track and then rides a reliable,
+ordered data channel, so it alternates stalling and arriving in dumps (a live
+session was measured delivering 2.6 s of audio inside 310 ms). The face renders
+a real-time stream and stutters on a dump, so the SDK smooths the hand-off:
+audio is released at up to 1.5× real time, fast enough that it always out-runs
+playback — the pacing adds no latency to what the listener hears — but never in
+a dump. Read `agent.avatarAudioStats` to see it working (`maxQueuedMs` is how
+big a dump was absorbed); set `pacing: false` to hand chunks straight through.
 
 **A missing face never costs you the session.** If the avatar can't be minted or
 doesn't come up within `timeoutMs`, the conversation still connects **audio-only**
@@ -188,7 +198,7 @@ new WhissleAgent({
   sessionToken: "…",     // a token your backend already minted
   getToken: () => "…",   // …or a function that fetches one, called on every start()
   agentId: "…",          // which agent to talk to (not needed with a token)
-  avatar: "F1-HR",       // string | true | { id, container, required, timeoutMs }
+  avatar: "F1-HR",       // string | true | { id, container, required, timeoutMs, pacing }
   transport: "auto",     // "auto" | "webrtc" | "livekit"
   baseUrl: "…",          // override the API host (self-hosted / staging)
   iceServers: [ … ],     // custom ICE/TURN — wins over anything the mint suggests

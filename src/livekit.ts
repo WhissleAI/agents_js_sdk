@@ -19,7 +19,19 @@ export interface SessionCallbacks {
   onBotReady: (data: unknown) => void;
   onBotStartedSpeaking: () => void;
   onBotStoppedSpeaking: () => void;
-  onBotOutput: (text: string) => void;
+  /**
+   * A `bot-output` segment. `spoken` is the message's own flag: true when the
+   * aggregation came off the TTS stream (the words as they are said), false
+   * when it came off the LLM stream. A gateway emits BOTH for every sentence,
+   * so the flag is the only thing that tells the two copies apart.
+   */
+  onBotOutput: (text: string, spoken: boolean) => void;
+  /**
+   * `bot-transcription`, the message `bot-output` replaced. Kept apart from
+   * `onBotOutput` on purpose — a gateway sends both, so merging them adds a
+   * third copy of the same reply. See the handler below.
+   */
+  onBotLegacyOutput: (text: string) => void;
   onUserTranscript: (text: string, final: boolean) => void;
   onRemoteAudioTrack: (track: MediaStreamTrack) => void;
   onServerMessage: (data: unknown) => void;
@@ -115,8 +127,16 @@ export class LiveKitSession {
         cb.onBotStoppedSpeaking();
         break;
       case RTVIMessageType.BOT_OUTPUT:
+        cb.onBotOutput(String(data.text ?? ""), data.spoken === true);
+        break;
+      // `bot-transcription` is NOT a second copy of `bot-output` arriving late —
+      // it is a third view of the same reply, cut on LLM tokens at sentence
+      // boundaries, and pipecat's RTVI observer emits it alongside the other
+      // two. It lands earlier and in generation order, so folding it into
+      // `onBotOutput` is what scrambled the doubled text. Pass it on its own
+      // channel; the agent uses it only when a gateway sends nothing better.
       case RTVIMessageType.BOT_TRANSCRIPTION:
-        cb.onBotOutput(String(data.text ?? ""));
+        cb.onBotLegacyOutput(String(data.text ?? ""));
         break;
       case RTVIMessageType.USER_TRANSCRIPTION:
         cb.onUserTranscript(String(data.text ?? ""), Boolean(data.final));
