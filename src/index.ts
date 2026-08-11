@@ -6,5 +6,5 @@ export {
   type WhissleSessionInfo,
   type WhissleTransport,
 } from "./WhissleAgent";
-export { type AvatarOptions } from "./avatar";
+export { type AvatarAudioStats, type AvatarOptions } from "./avatar";
 export { mount, type WidgetOptions } from "./widget";

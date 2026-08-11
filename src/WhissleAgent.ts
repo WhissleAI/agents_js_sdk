@@ -1,6 +1,12 @@
 import { PipecatClient } from "@pipecat-ai/client-js";
 import { SmallWebRTCTransport } from "@pipecat-ai/small-webrtc-transport";
-import { decodeBase64, normalizeAvatar, SimliAvatar, type AvatarOptions } from "./avatar";
+import {
+  decodeBase64,
+  normalizeAvatar,
+  SimliAvatar,
+  type AvatarAudioStats,
+  type AvatarOptions,
+} from "./avatar";
 import { LiveKitSession, type LiveKitConnectInfo, type SessionCallbacks } from "./livekit";
 
 const DEFAULT_BASE_URL = "https://aws-gateway-backend.whissle.ai/bot";
@@ -174,11 +180,24 @@ export class WhissleAgent {
   /** ICE for the session being opened — resolved from caller > mint > defaults. */
   private ice: RTCIceServer[] = DEFAULT_ICE;
   private remoteTrack: MediaStreamTrack | null = null;
-  // Accumulates the agent's bot-output segments for the CURRENT turn. The backend
-  // (pipecat) emits one bot-output per aggregated sentence, so a multi-sentence
-  // reply arrives as several segments; we buffer them and emit ONE agent-transcript
-  // per turn (flushed when the bot stops speaking) instead of one per sentence.
-  private _botTurn = "";
+  /**
+   * The current turn, buffered THREE times over.
+   *
+   * A pipecat gateway describes one reply with three streams of RTVI messages:
+   * `bot-output` aggregated off the TTS stream (`spoken: true`), `bot-output`
+   * aggregated off the LLM stream (`spoken: false`), and the deprecated
+   * `bot-transcription`. They carry the same sentences, cut at the same places,
+   * but they arrive at different times — so appending them all to one buffer is
+   * what made every reply appear two or three times over, interleaved out of
+   * order. Keep them apart, and emit exactly one of them per turn.
+   *
+   * Each buffer accumulates per SENTENCE (that is the aggregation the gateway
+   * sends) and is flushed as ONE `agent-transcript` when the bot stops
+   * speaking, so a multi-sentence reply is one event, not one per sentence.
+   */
+  private _turnSpoken = "";
+  private _turnUnspoken = "";
+  private _turnLegacy = "";
 
   constructor(options: WhissleAgentOptions) {
     if (!options?.apiKey && !options?.sessionToken && !options?.getToken) {
@@ -229,6 +248,18 @@ export class WhissleAgent {
   /** The avatar's `<video>`, once one exists. Place it wherever you like. */
   get videoElement(): HTMLVideoElement | null {
     return this.avatar?.video ?? null;
+  }
+
+  /**
+   * What the avatar's audio path is doing. `null` without an avatar (or with
+   * `avatar.pacing: false`).
+   *
+   * The one to watch is `maxQueuedMs`: a healthy real-time feed never holds
+   * more than one chunk (~190 ms), so a large value is audio that reached the
+   * browser in a burst and was re-timed rather than allowed to stutter the face.
+   */
+  get avatarAudioStats(): AvatarAudioStats | null {
+    return this.avatar?.audioStats ?? null;
   }
 
   on(event: WhissleEvent, handler: Handler): this {
@@ -388,7 +419,7 @@ export class WhissleAgent {
         face_id?: string;
       };
 
-      const avatar = new SimliAvatar(this.resolveVideoElement(wanted));
+      const avatar = new SimliAvatar(this.resolveVideoElement(wanted), wanted.pacing !== false);
       this.avatar = avatar;
       await withTimeout(
         avatar.start(mint),
@@ -424,8 +455,9 @@ export class WhissleAgent {
     return video;
   }
 
-  /** The callbacks both transports feed. One brain, two wires. */
-  private callbacks(): SessionCallbacks {
+  /** The callbacks both transports feed. One brain, two wires. (Protected so a
+   *  test can drive the transcript/turn logic without a browser.) */
+  protected callbacks(): SessionCallbacks {
     return {
       onConnected: () => {
         this._state = "connected";
@@ -440,23 +472,35 @@ export class WhissleAgent {
       },
       onBotReady: (data) => this.emit("bot-ready", data),
       onBotStartedSpeaking: () => {
-        this._botTurn = ""; // new turn — start a fresh transcript buffer
+        // New turn — start fresh `bot-output` buffers. NOT the legacy one: it is
+        // cut on LLM tokens and lands BEFORE the bot starts speaking, so
+        // clearing it here would throw the only copy some gateways send away.
+        this._turnSpoken = "";
+        this._turnUnspoken = "";
         this.emit("speaking-started");
       },
       onBotStoppedSpeaking: () => {
-        // Flush the whole turn's text as a single agent-transcript, once.
-        const text = this._botTurn.trim();
-        this._botTurn = "";
+        // One turn, one `agent-transcript`. Prefer what was actually SPOKEN —
+        // it is cut on the TTS stream, so it is both the words the listener
+        // heard and the order they heard them in. The other two are the same
+        // reply seen from further upstream, and are only worth anything when a
+        // gateway doesn't send the good one.
+        const text = (this._turnSpoken || this._turnUnspoken || this._turnLegacy).trim();
+        this._turnSpoken = "";
+        this._turnUnspoken = "";
+        this._turnLegacy = "";
         if (text) this.emit("agent-transcript", text);
         this.emit("speaking-stopped");
       },
-      onBotOutput: (segment) => {
-        // The backend emits one bot-output per aggregated SENTENCE of the reply.
-        // Buffer the segments and let onBotStoppedSpeaking emit a single
-        // agent-transcript for the turn — otherwise each sentence renders as its
-        // own bubble.
+      onBotOutput: (segment, spoken) => {
         const seg = segment.trim();
-        if (seg) this._botTurn = this._botTurn ? `${this._botTurn} ${seg}` : seg;
+        if (!seg) return;
+        if (spoken) this._turnSpoken = this._turnSpoken ? `${this._turnSpoken} ${seg}` : seg;
+        else this._turnUnspoken = this._turnUnspoken ? `${this._turnUnspoken} ${seg}` : seg;
+      },
+      onBotLegacyOutput: (segment) => {
+        const seg = segment.trim();
+        if (seg) this._turnLegacy = this._turnLegacy ? `${this._turnLegacy} ${seg}` : seg;
       },
       onUserTranscript: (text, final) => {
         if (final) this.emit("user-transcript", text);
@@ -527,7 +571,12 @@ export class WhissleAgent {
         },
         onUserTranscript: (data: { text: string; final?: boolean }) =>
           cb.onUserTranscript(data.text, Boolean(data.final)),
-        onBotOutput: (data: { text?: string }) => cb.onBotOutput(data?.text ?? ""),
+        // No `onBotTranscript` here: PipecatClient routes the deprecated
+        // `bot-transcription` to its own callback, and subscribing to it only
+        // buys a console warning on every session. `bot-output` still arrives
+        // twice per sentence though — the `spoken` flag is what separates them.
+        onBotOutput: (data: { text?: string; spoken?: boolean }) =>
+          cb.onBotOutput(data?.text ?? "", data?.spoken === true),
         onServerMessage: (data: unknown) => cb.onServerMessage(data),
         onError: (message: { data?: unknown }) =>
           cb.onError(typeof message?.data === "string" ? message.data : "Connection error."),
