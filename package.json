@@ -1,6 +1,6 @@
 {
   "name": "@whissle/agents",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Embed a Whissle voice agent into any web app. Create/configure the agent on platform.whissle.ai, then run a live conversation with a publishable key.",
   "license": "MIT",
   "author": "Whissle AI <support@whissle.ai>",

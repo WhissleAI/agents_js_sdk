@@ -308,6 +308,12 @@ function defaultHidden(): boolean {
  * once we've fallen back, never mix the two inputs, which garbles both.
  */
 const PCM_GRACE_MS = 14_000;
+/**
+ * How much pre-start audio to hold, in bytes. 16 kHz mono Int16 is 32 kB/s, so
+ * this is ~10 seconds — comfortably more than any greeting, and small enough
+ * that a face which never comes up costs nothing worth measuring.
+ */
+const MAX_PENDING_PCM_BYTES = 320_000;
 
 type SimliCtor = typeof import("simli-client/dist/client.js").SimliClient;
 
@@ -361,6 +367,16 @@ export class SimliAvatar {
   private started = false;
   private destroyed = false;
   private pendingTrack: MediaStreamTrack | null = null;
+  /**
+   * PCM that arrived before the face was live.
+   *
+   * The greeting is spoken the instant the session connects, which is while
+   * Simli is still starting — so the very first audio of every conversation
+   * lands here. It used to be dropped on the floor, which is why the greeting
+   * was the one reply the avatar never moved for.
+   */
+  private pendingPcm: Uint8Array[] = [];
+  private pendingPcmBytes = 0;
   private usingTrack = false;
   private gotPcm = false;
   private fallbackTimer: ReturnType<typeof setTimeout> | null = null;
@@ -421,6 +437,13 @@ export class SimliAvatar {
         this.pendingTrack = null;
         this.attachTrack(track);
       }
+      // Whatever was said while the face was coming up, said now.
+      if (this.pendingPcm.length) {
+        const queued = this.pendingPcm;
+        this.pendingPcm = [];
+        this.pendingPcmBytes = 0;
+        for (const chunk of queued) this.sendPcm(chunk);
+      }
       play();
     });
     const fail = (...args: unknown[]) => {
@@ -473,11 +496,27 @@ export class SimliAvatar {
    * bursts, and Simli wants them at the rate they are spoken.
    */
   sendPcm(bytes: Uint8Array): void {
-    if (this.destroyed || !this.client || !this.started || this.usingTrack) return;
+    if (this.destroyed || !this.client || this.usingTrack) return;
+    // PCM is proof the gateway mirrors clean audio, whether or not the face is
+    // ready for it yet. Record that FIRST: the track fallback exists for
+    // gateways that send none, and letting it fire here would switch the avatar
+    // to the raw track permanently — after which every later chunk of clean PCM
+    // is discarded and the mouth barely moves for the rest of the call.
     this.gotPcm = true;
     if (this.fallbackTimer) {
       clearTimeout(this.fallbackTimer);
       this.fallbackTimer = null;
+    }
+    if (!this.started) {
+      // Bounded: a face that never starts must not grow a buffer without limit.
+      // Past the cap the oldest audio goes, since a late greeting is worth less
+      // than the words after it.
+      this.pendingPcm.push(bytes);
+      this.pendingPcmBytes += bytes.byteLength;
+      while (this.pendingPcmBytes > MAX_PENDING_PCM_BYTES && this.pendingPcm.length > 1) {
+        this.pendingPcmBytes -= this.pendingPcm.shift()!.byteLength;
+      }
+      return;
     }
     if (this.pacer) this.pacer.push(bytes);
     else this.forward(bytes);
@@ -518,6 +557,8 @@ export class SimliAvatar {
   async destroy(): Promise<void> {
     this.destroyed = true;
     this.pendingTrack = null;
+    this.pendingPcm = [];
+    this.pendingPcmBytes = 0;
     this.pacer?.stop();
     if (this.fallbackTimer) {
       clearTimeout(this.fallbackTimer);
