@@ -134,6 +134,12 @@ export type WhissleEvent =
   | "mic-lost"
   /** The microphone came back. Only ever follows a `mic-lost`. */
   | "mic-restored"
+  /**
+   * A structured message from the agent that this SDK does not itself consume —
+   * your own application events, passed through untouched. The payload is
+   * whatever the agent sent.
+   */
+  | "server-message"
   | "error";
 
 type Handler = (payload?: unknown) => void;
@@ -568,7 +574,13 @@ export class WhissleAgent {
         }
         if (msg?.type === "error" && msg?.error === "no_credits") {
           this.emit("error", msg.message || "This agent has run out of credits.");
+          return;
         }
+        // Everything else is the agent talking to YOUR app. The SDK has no
+        // opinion about it — an interview announcing which question it just
+        // reached, a form reporting a field captured — so hand it over intact
+        // rather than dropping what it doesn't recognise.
+        this.emit("server-message", data);
       },
       onError: (message) => this.emit("error", message),
     };
@@ -740,6 +752,34 @@ export class WhissleAgent {
       track.removeEventListener("mute", lost);
       track.removeEventListener("unmute", back);
     };
+  }
+
+  /**
+   * Send a control message to the running agent.
+   *
+   * The counterpart of the `server-message` event: this is how your app drives
+   * behaviour the SDK knows nothing about — pausing an interview, asking it to
+   * wrap up, telling it the user is ready.
+   *
+   *   agent.send("wrap-up");
+   *   agent.send("set-difficulty", { level: "hard" });
+   *
+   * Delivered on the session's reliable data channel. Safe to call before the
+   * session is up — it is dropped rather than throwing, because a lost control
+   * message must never take down a live conversation.
+   */
+  send(type: string, data?: unknown): void {
+    try {
+      if (this.lk) {
+        this.lk.send({ type, ...(data !== undefined ? { data } : {}) });
+        return;
+      }
+      (this.client as unknown as {
+        sendClientMessage?: (t: string, d?: unknown) => void;
+      })?.sendClientMessage?.(type, data);
+    } catch {
+      /* a dropped control message is not worth ending the session over */
+    }
   }
 
   /** End the session and clean up. */

@@ -191,7 +191,27 @@ that doesn't have it enabled fails loudly rather than silently downgrading.
 | `user-interim` | `string` | the caller's speech while still being recognised — provisional, replaced by the next one and finally by `user-transcript`. Render it greyed/italic; never store it. Without it a speaker sees nothing while they talk and assumes they aren't heard. |
 | `mic-lost` | — | the microphone stopped producing audio mid-session (unplugged, taken by another app, permission revoked). The session stays up, so tell the caller rather than tearing down. |
 | `mic-restored` | — | it came back. Only ever follows `mic-lost`. |
+| `server-message` | `unknown` | a structured message from the agent that the SDK doesn't consume itself — your own application events, passed through untouched |
 | `error` | `string` | mic denied, origin not allowed, credits out, … |
+
+## Talking to the running agent
+
+Some behaviour is your application's, not the SDK's: pausing an interview,
+asking it to wrap up early, telling it the user is ready. `send` puts a message
+on the session's data channel, and `server-message` delivers what comes back.
+
+```ts
+agent.on("server-message", (m) => {
+  // e.g. { t: "question", index: 3, text: "Why CPVC?" }
+});
+
+agent.send("wrap-up");
+agent.send("set-difficulty", { level: "hard" });
+```
+
+`send` is safe to call before the session is up — the message is dropped rather
+than thrown, because a lost control message should never take down a live
+conversation.
 
 ## Options
 
