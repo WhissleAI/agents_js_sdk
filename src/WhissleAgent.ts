@@ -111,10 +111,29 @@ export type WhissleEvent =
   | "speaking-started"
   | "speaking-stopped"
   | "user-transcript"
+  /**
+   * The caller's speech as it is still being recognised — replaced by the next
+   * one, and finally by a `user-transcript`. Render it as provisional (greyed,
+   * italic) and never store it: it is a guess that changes.
+   *
+   * Worth wiring even though it carries no information the final doesn't. A
+   * speaker with nothing on screen while they talk assumes they aren't being
+   * heard, and starts repeating themselves.
+   */
+  | "user-interim"
   | "agent-transcript"
   | "bot-ready"
   | "avatar-ready"
   | "avatar-failed"
+  /**
+   * The microphone stopped producing audio mid-session — unplugged, grabbed by
+   * another app, or revoked in browser settings. The session stays up (the
+   * caller can still hear the agent), so this is a prompt to tell them, not a
+   * reason to tear down.
+   */
+  | "mic-lost"
+  /** The microphone came back. Only ever follows a `mic-lost`. */
+  | "mic-restored"
   | "error";
 
 type Handler = (payload?: unknown) => void;
@@ -180,6 +199,10 @@ export class WhissleAgent {
   /** ICE for the session being opened — resolved from caller > mint > defaults. */
   private ice: RTCIceServer[] = DEFAULT_ICE;
   private remoteTrack: MediaStreamTrack | null = null;
+  /** The caller's own mic track, watched so we can say when it dies. */
+  private micTrack: MediaStreamTrack | null = null;
+  private micWatch: (() => void) | null = null;
+  private micIsLost = false;
   /**
    * The current turn, buffered THREE times over.
    *
@@ -461,6 +484,7 @@ export class WhissleAgent {
     return {
       onConnected: () => {
         this._state = "connected";
+        this.watchMic();
         // Clean PCM is the good input; the track is the safety net for a gateway
         // that doesn't mirror it. Arm the net only once we're actually live.
         this.avatar?.armTrackFallback(() => this.remoteTrack);
@@ -503,7 +527,7 @@ export class WhissleAgent {
         if (seg) this._turnLegacy = this._turnLegacy ? `${this._turnLegacy} ${seg}` : seg;
       },
       onUserTranscript: (text, final) => {
-        if (final) this.emit("user-transcript", text);
+        this.emit(final ? "user-transcript" : "user-interim", text);
       },
       onRemoteAudioTrack: (track) => {
         this.remoteTrack = track;
@@ -662,6 +686,48 @@ export class WhissleAgent {
     }
   }
 
+  /**
+   * Watch the caller's microphone for the ways it stops mid-session: unplugged,
+   * taken by another application, or revoked in browser settings.
+   *
+   * A dead mic is invisible from inside a call — the agent simply waits, the
+   * caller keeps talking, and neither can tell the other why nothing is
+   * happening. The track's own `ended`/`mute` events are the only honest signal,
+   * so surface them and let the app say something.
+   *
+   * `mute` here is the DEVICE going silent, not the caller pressing mute
+   * (`setMuted` disables the track, which fires nothing).
+   */
+  private watchMic(): void {
+    if (typeof navigator === "undefined" || this.micWatch) return;
+    // The live outbound track, whichever transport published it.
+    const track =
+      this.lk?.micTrack?.() ??
+      (this.client as unknown as { tracks?: () => { local?: { audio?: MediaStreamTrack } } })
+        ?.tracks?.()?.local?.audio ??
+      null;
+    if (!track) return;
+    this.micTrack = track;
+    const lost = () => {
+      if (this.micIsLost) return;
+      this.micIsLost = true;
+      this.emit("mic-lost");
+    };
+    const back = () => {
+      if (!this.micIsLost) return;
+      this.micIsLost = false;
+      this.emit("mic-restored");
+    };
+    track.addEventListener("ended", lost);
+    track.addEventListener("mute", lost);
+    track.addEventListener("unmute", back);
+    this.micWatch = () => {
+      track.removeEventListener("ended", lost);
+      track.removeEventListener("mute", lost);
+      track.removeEventListener("unmute", back);
+    };
+  }
+
   /** End the session and clean up. */
   stop(): void {
     void this.teardown();
@@ -678,6 +744,10 @@ export class WhissleAgent {
     this.lk?.disconnect();
     this.lk = null;
     this.remoteTrack = null;
+    this.micWatch?.();
+    this.micWatch = null;
+    this.micTrack = null;
+    this.micIsLost = false;
     const avatar = this.avatar;
     this.avatar = null;
     await avatar?.destroy();
