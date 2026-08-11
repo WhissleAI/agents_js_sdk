@@ -11,9 +11,32 @@ const DEFAULT_ICE = [
 export interface WhissleAgentOptions {
   /** Your publishable Whissle key (from the agent's Embed & SDK settings). Safe
    *  to ship in client code — it's origin-restricted and only authorizes a
-   *  metered session with this agent. */
-  apiKey: string;
-  /** The agent to talk to (from platform.whissle.ai). */
+   *  metered session with this agent.
+   *
+   *  Required UNLESS you pass `getToken`, in which case no key belongs here at
+   *  all. Never put a `wsk_` secret key in either field: it carries full org
+   *  authority and this code runs in a browser. */
+  apiKey?: string;
+  /**
+   * Get a session token from YOUR backend instead of minting one here.
+   *
+   * Use this whenever your app already knows who the user is. Your server calls
+   * `whissle.embed.sessionToken(agentId)` (`@whissle/sdk`) behind your own auth
+   * and returns just the token — so the browser holds no Whissle credential of
+   * any kind, and which visitor may talk to which agent is your decision, made
+   * where you can enforce it.
+   *
+   *   new WhissleAgent({
+   *     getToken: () => fetch("/api/voice-token", { credentials: "include" })
+   *       .then((r) => r.json()).then((d) => d.token),
+   *   })
+   *
+   * Called on every `start()`, so a reconnect after a long idle gets a fresh
+   * token rather than reusing an expired one. When set, `apiKey` and `agentId`
+   * are ignored — the token already names the agent.
+   */
+  getToken?: () => string | Promise<string>;
+  /** The agent to talk to (from platform.whissle.ai). Not needed with `getToken`. */
   agentId?: string;
   /** Override the API base URL (self-hosted / staging). */
   baseUrl?: string;
@@ -36,7 +59,15 @@ type Handler = (payload?: unknown) => void;
 /**
  * A single voice conversation with one Whissle agent.
  *
+ *   // A widget on a public page — a publishable key, origin-restricted:
  *   const agent = new WhissleAgent({ apiKey: "wpk_…", agentId: "…" });
+ *
+ *   // Inside a product that already logged the user in — no key in the browser
+ *   // at all; your server mints the session behind your own auth:
+ *   const agent = new WhissleAgent({
+ *     getToken: () => fetch("/api/voice-token").then((r) => r.json()).then((d) => d.token),
+ *   });
+ *
  *   agent.on("agent-transcript", (t) => console.log(t));
  *   await agent.start();      // asks for the mic, connects
  *   …
@@ -46,7 +77,7 @@ type Handler = (payload?: unknown) => void;
  * use WhissleAgent.mount() for a ready-made widget.
  */
 export class WhissleAgent {
-  private opts: Required<Pick<WhissleAgentOptions, "apiKey" | "baseUrl" | "iceServers">> &
+  private opts: Required<Pick<WhissleAgentOptions, "baseUrl" | "iceServers">> &
     WhissleAgentOptions;
   private client: PipecatClient | null = null;
   private audioEl: HTMLAudioElement | null = null;
@@ -59,12 +90,26 @@ export class WhissleAgent {
   private _botTurn = "";
 
   constructor(options: WhissleAgentOptions) {
-    if (!options?.apiKey) throw new Error("WhissleAgent: `apiKey` is required.");
+    if (!options?.apiKey && !options?.getToken) {
+      throw new Error(
+        "WhissleAgent: pass `apiKey` (a publishable wpk_ key) or `getToken` (a function " +
+          "that fetches a session token from your own backend).",
+      );
+    }
+    // A secret key here would be shipped to every visitor's browser, where it
+    // carries full authority over the workspace. Refuse loudly rather than let
+    // it reach a page — the mint would even succeed, which is what makes this
+    // worth catching at construction.
+    if (options.apiKey?.startsWith("wsk_")) {
+      throw new Error(
+        "WhissleAgent: that's a SECRET key (wsk_) and this code runs in a browser. Use a " +
+          "publishable (wpk_) key, or mint a session token on your server and pass `getToken`.",
+      );
+    }
     this.opts = {
       baseUrl: DEFAULT_BASE_URL,
       iceServers: DEFAULT_ICE,
       ...options,
-      apiKey: options.apiKey,
     };
   }
 
@@ -93,8 +138,27 @@ export class WhissleAgent {
     });
   }
 
-  /** Mint a short-lived session token for this agent + origin. */
+  /**
+   * The session token for this conversation.
+   *
+   * Either your backend hands us one (`getToken` — then no key was ever in this
+   * page), or we mint one here from a publishable key bound to this origin.
+   */
   private async mintToken(): Promise<string> {
+    if (this.opts.getToken) {
+      const token = await this.opts.getToken();
+      if (!token) {
+        // Almost always your endpoint refusing the user rather than a bug here,
+        // so say that instead of a generic failure.
+        throw new Error(
+          "WhissleAgent: `getToken` returned nothing — your backend didn't issue a session " +
+            "token (is the user signed in?).",
+        );
+      }
+      return token;
+    }
+    // Guaranteed by the constructor: without `getToken` there is an apiKey.
+    const apiKey = this.opts.apiKey!;
     const res = await fetch(`${this.opts.baseUrl}/api/embed/session-token`, {
       method: "POST",
       credentials: "omit",
@@ -102,9 +166,7 @@ export class WhissleAgent {
       body: JSON.stringify({
         // A publishable key (wpk_) resolves the org; agent_id picks the agent.
         // A per-agent embed key (wek_) is accepted too, for convenience.
-        ...(this.opts.apiKey.startsWith("wek_")
-          ? { embed_key: this.opts.apiKey }
-          : { api_key: this.opts.apiKey }),
+        ...(apiKey.startsWith("wek_") ? { embed_key: apiKey } : { api_key: apiKey }),
         agent_id: this.opts.agentId,
         parent_origin: typeof location !== "undefined" ? location.origin : undefined,
       }),

@@ -79,23 +79,62 @@ await agent.start();   // asks for the mic, connects
 | `agent-transcript` | `string` | agent reply text |
 | `error` | `string` | mic denied, origin not allowed, credits out, … |
 
+## Inside a product that already has users
+
+The setup above puts a publishable key in the page — right for a widget on a
+public site, where every visitor is anonymous and the origin allowlist is the
+control.
+
+If your app already knows who the user is, you want the other shape: **your**
+server decides who may talk to which agent, and the browser holds no Whissle
+credential at all. Mint the session behind your own auth and hand back the token:
+
+```ts
+// your API route (server) — @whissle/sdk, secret key never leaves here
+const session = await whissle.embed.sessionToken(agentId);
+return Response.json({ token: session.token });     // 900s
+```
+
+```ts
+// your page — no key
+const agent = new WhissleAgent({
+  getToken: () =>
+    fetch("/api/voice-token", { credentials: "include" })
+      .then((r) => r.json())
+      .then((d) => d.token),
+});
+await agent.start();
+```
+
+`getToken` runs on every `start()`, so a reconnect after a long idle fetches a
+fresh token instead of reusing an expired one. With it, `apiKey` and `agentId`
+are unnecessary — the token already names the agent.
+
+A token minted server-side with a secret key is *server-trusted*: it carries no
+origin, so there is no allowlist to keep in step with your deploy URLs.
+
 ## Options
 
 ```ts
 new WhissleAgent({
-  apiKey: "wpk_…",       // required — your publishable key
-  agentId: "…",          // which agent to talk to
+  apiKey: "wpk_…",       // your publishable key — required unless getToken is set
+  getToken: () => …,     // or: fetch a session token from your own backend
+  agentId: "…",          // which agent to talk to (not needed with getToken)
   baseUrl: "…",          // optional — override the API host
   iceServers: [ … ],     // optional — custom ICE/TURN
 });
 ```
 
+Passing a **secret** (`wsk_`) key throws at construction. It would otherwise work
+— the mint accepts it — while shipping full workspace authority to every visitor.
+
 ## Notes
 
 - **Microphone**: the browser prompts for mic access on `start()`. Serve your
   page over HTTPS (WebRTC + mic require a secure context).
-- **Allowed origins**: a session is refused (403) from a site you haven't listed
-  in the agent's Embed settings. Add your domain there.
+- **Allowed origins**: with a publishable key, a session is refused (403) from a
+  site you haven't listed in the agent's Embed settings. Add your domain there.
+  Tokens minted server-side with `getToken` are exempt — they carry no origin.
 - **Metering**: each session debits your Whissle workspace wallet; a session ends
   automatically if credit runs out.
 
