@@ -61,7 +61,7 @@ export interface WhissleAgentOptions {
    * Use `getToken` instead when the session may outlive the token (it is called
    * again on every `start()`); use this when you already have one in hand.
    */
-  sessionToken?: string;
+  sessionToken?: string | WhissleSessionInfo;
   /**
    * Get a session token from YOUR backend instead of minting one here.
    *
@@ -70,7 +70,7 @@ export interface WhissleAgentOptions {
    * expired one. When set, `apiKey` and `agentId` are ignored — the token
    * already names the agent.
    */
-  getToken?: () => string | Promise<string>;
+  getToken?: () => string | WhissleSessionInfo | Promise<string | WhissleSessionInfo>;
   /** The agent to talk to (from platform.whissle.ai). Not needed with a token. */
   agentId?: string;
   /** Override the API base URL (self-hosted / staging). */
@@ -137,6 +137,20 @@ export type WhissleEvent =
   | "error";
 
 type Handler = (payload?: unknown) => void;
+
+/**
+ * Accept either half of what a backend can hand back.
+ *
+ * A bare token is the obvious thing to return and it works — but it is only the
+ * credential. The mint also says which transport to use, with which ICE servers,
+ * and what the call will be called, and a backend that forwards the whole
+ * response gets all of it. Returning just the string quietly opts out of LiveKit
+ * and out of the gateway's own ICE, which is precisely backwards: the server-mint
+ * path is the one that most wants them.
+ */
+function asSession(v: string | WhissleSessionInfo): WhissleSessionInfo {
+  return typeof v === "string" ? { token: v } : v;
+}
 
 /** Reject with `message` if `work` hasn't settled in `ms`. */
 function withTimeout<T>(work: Promise<T>, ms: number, message: string): Promise<T> {
@@ -314,10 +328,10 @@ export class WhissleAgent {
    * to this origin, and get the full session descriptor with it.
    */
   private async mintSession(): Promise<WhissleSessionInfo> {
-    if (this.opts.sessionToken) return { token: this.opts.sessionToken };
+    if (this.opts.sessionToken) return asSession(this.opts.sessionToken);
     if (this.opts.getToken) {
       const token = await this.opts.getToken();
-      if (!token) {
+      if (!token || (typeof token === "object" && !token.token)) {
         // Almost always your endpoint refusing the user rather than a bug here,
         // so say that instead of a generic failure.
         throw new Error(
@@ -325,7 +339,7 @@ export class WhissleAgent {
             "token (is the user signed in?).",
         );
       }
-      return { token };
+      return asSession(token);
     }
     // Guaranteed by the constructor: without a token there is an apiKey.
     const apiKey = this.opts.apiKey!;
