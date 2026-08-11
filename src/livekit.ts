@@ -153,6 +153,20 @@ export class LiveKitSession {
     }
   }
 
+  /**
+   * The caller's published mic track, so the agent can watch it for the device
+   * dying. Null before connect, or if the mic was never published.
+   */
+  micTrack(): MediaStreamTrack | null {
+    const pubs = this.room?.localParticipant?.audioTrackPublications;
+    if (!pubs) return null;
+    for (const pub of pubs.values()) {
+      const t = (pub as { track?: { mediaStreamTrack?: MediaStreamTrack } })?.track?.mediaStreamTrack;
+      if (t) return t;
+    }
+    return null;
+  }
+
   setMuted(muted: boolean): void {
     this.micEnabled = !muted;
     void this.room?.localParticipant.setMicrophoneEnabled(this.micEnabled)?.catch?.(() => undefined);

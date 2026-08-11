@@ -188,6 +188,9 @@ that doesn't have it enabled fails loudly rather than silently downgrading.
 | `agent-transcript` | `string` | agent reply text |
 | `avatar-ready` | `{ video, faceId }` | the face is live; `video` is an `HTMLVideoElement` |
 | `avatar-failed` | `string` | no face this session — the reason. Not fatal |
+| `user-interim` | `string` | the caller's speech while still being recognised — provisional, replaced by the next one and finally by `user-transcript`. Render it greyed/italic; never store it. Without it a speaker sees nothing while they talk and assumes they aren't heard. |
+| `mic-lost` | — | the microphone stopped producing audio mid-session (unplugged, taken by another app, permission revoked). The session stays up, so tell the caller rather than tearing down. |
+| `mic-restored` | — | it came back. Only ever follows `mic-lost`. |
 | `error` | `string` | mic denied, origin not allowed, credits out, … |
 
 ## Options

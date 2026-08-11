@@ -19,8 +19,13 @@ export interface AvatarOptions {
    * Where to put the `<video>`. A CSS selector or an element. Omit and the SDK
    * creates the element but attaches it to nothing — read `agent.videoElement`
    * (or the `avatar-ready` payload) and place it yourself.
+   *
+   * Pass a `<video>` ELEMENT (rather than a container to append into) and the
+   * SDK renders straight into yours instead of making its own. That is the hook
+   * for an app that has to own the element — one doing chroma-key compositing,
+   * a custom frame, or anything else that has to be the thing on screen.
    */
-  container?: string | HTMLElement;
+  container?: string | HTMLElement | HTMLVideoElement;
   /**
    * Treat an avatar failure as a session failure. Default `false`: if the avatar
    * can't be minted or started, the conversation still connects **audio-only**
