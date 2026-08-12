@@ -19,9 +19,10 @@ the origins you allow and only authorizes a session with the agent you chose.
 
 ## A complete example
 
-[`examples/interview-platform`](examples/interview-platform) is a working
-interview platform in ~250 lines — roles become agents, the server mints
-sessions, the browser holds no key. `npm install && npm start`.
+[`examples/interview-platform`](examples/interview-platform) is a small but
+complete app in ~300 lines: agents declared in a JSON file, live calls with or
+without a face, and every past session with its transcript and score. No
+database, no build step — `npm install && npm start`.
 
 ## Install
 

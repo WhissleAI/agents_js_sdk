@@ -430,8 +430,16 @@ export class SimliAvatar {
     this.audio.addEventListener("loadeddata", play);
 
     let failure: string | null = null;
+    // Resolved by the `start` event below — the server saying the session is
+    // live. See the race at the end of this method for why that is needed as
+    // well as simli's own start promise.
+    let markLive: () => void = () => undefined;
+    const live = new Promise<void>((resolve) => {
+      markLive = resolve;
+    });
     client.on("start", () => {
       this.started = true;
+      markLive();
       if (this.pendingTrack) {
         const track = this.pendingTrack;
         this.pendingTrack = null;
@@ -452,8 +460,23 @@ export class SimliAvatar {
     client.on("error", fail);
     client.on("startup_error", fail);
 
-    // Resolves when the face is live; rejects (after its own retries) otherwise.
-    await client.start();
+    // simli-client reports ready only from a `requestVideoFrameCallback`, so its
+    // start promise waits for a frame to actually PAINT. A tab that is in the
+    // background, occluded, or throttled paints nothing — so a session whose
+    // media is flowing perfectly still times out, and the caller is told the
+    // avatar failed and drops to voice for the rest of the call. Someone who
+    // starts a call and glances at another tab should not lose the face.
+    //
+    // The server's own `start` event says the session is live without asking
+    // anything of the compositor. Take whichever arrives first: a painted frame
+    // proves it, and so does the server.
+    const startup = client.start();
+    // The race means this promise can settle after we have moved on. Without a
+    // handler, a late rejection surfaces as an unhandled rejection and, in a
+    // page with a strict handler, as a crash. `failure` below is what actually
+    // reports errors.
+    void startup.catch(() => undefined);
+    await Promise.race([startup, live]);
     if (failure) throw new Error(failure);
     this.started = true;
     play();

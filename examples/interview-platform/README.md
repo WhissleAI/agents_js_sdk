@@ -1,8 +1,8 @@
-# Interview platform
+# A small Whissle app
 
-A complete, working interview platform in about 250 lines. A candidate picks a
-role, talks to an examiner with a face, and gets graded — and the browser never
-holds a Whissle key.
+Four agents, live voice calls with or without a face, and every past session with
+its transcript and score. About 300 lines, and the browser never holds a Whissle
+key.
 
 ```bash
 npm install
@@ -10,18 +10,26 @@ export WHISSLE_API_KEY=wsk_live_…      # whissle.ai → Settings → API keys
 npm start                              # http://localhost:4000
 ```
 
-No database, no build step, no framework. Open the page, pick a role, allow the
+No database, no build step, no framework. Open the page, pick an agent, allow the
 microphone.
+
+Three views:
+
+| | |
+|---|---|
+| **Agents** | what `agents.json` declared, provisioned on the platform |
+| **Call** | a live conversation — avatar on or off, per call |
+| **Sessions** | what has happened, with transcripts and scores |
 
 ---
 
-## What happens when you click a role
+## What happens when you click an agent
 
 ```
 browser                    this server                      Whissle
-   │  POST /api/interviews      │
-   ├───────────────────────────►│  who is this candidate?   (your auth)
-   │                            │  does this role have an agent yet?
+   │  POST /api/sessions        │
+   ├───────────────────────────►│  who is this user?        (your auth)
+   │                            │  may they talk to this agent?
    │                            ├──────────────────────────────►  create it, once
    │                            ├──────────────────────────────►  mint a session
    │◄───────────────────────────┤  token + transport + ICE
@@ -38,9 +46,33 @@ The server's job ends once the token is issued. Media never passes through it.
 
 | | |
 |---|---|
-| **`roles.json`** | What you interview for. Title, skills, questions, reference material. Editing this is how you make it yours. |
-| **`server.mjs`** | ~150 lines. Turns roles into agents, mints session tokens, reads results. Holds the secret key. |
-| **`index.html`** | One page. Runs the conversation with `@whissle/agents`. Holds nothing. |
+| **`agents.json`** | Every agent the app owns. Editing this file is how you change the app. |
+| **`server.mjs`** | ~200 lines. Provisions agents, mints session tokens, reads sessions back. Holds the secret key. |
+| **`index.html`** | One page, three views. Runs the conversation with `@whissle/agents`. Holds nothing. |
+
+### `agents.json`
+
+Four kinds, to show the range — two graded interviews, a tutor, and a voice-only
+assistant:
+
+```jsonc
+{
+  "id": "line-cook",
+  "name": "Interview — Line Cook",
+  "type": "skills_exam",          // whissle agents types, for the full catalogue
+  "avatar": "F2-TL",              // omit for voice only
+  "knowledge": "Poultry to 74 °C…",   // what makes it know YOUR domain
+  "interview": {                  // present → prompt + rubric are built from it
+    "skills": ["Food safety and HACCP", …],
+    "questions": ["What are the safe internal temperatures…", …]
+  }
+}
+```
+
+An entry with an `interview` block becomes a graded examiner: its prompt and its
+scoring rubric are both generated from the same skills, so the two cannot drift
+apart. An entry without one just uses `prompt` and `greeting` — that is all a
+tutor or an assistant needs.
 
 ---
 
@@ -53,14 +85,14 @@ in fifteen minutes.
 ```js
 // server — behind YOUR auth
 const session = await whissle.embed.sessionToken(agentId, {
-  metadata: { candidate, role },      // yours; lands on the call record
+  metadata: { user, agent },          // yours; lands on the call record
 });
 ```
 
 ```js
 // browser — no key
 new WhissleAgent({
-  getToken: () => fetch("/api/interviews", { method: "POST", … }).then((r) => r.json()),
+  getToken: () => fetch("/api/sessions", { method: "POST", … }).then((r) => r.json()),
 });
 ```
 
@@ -78,20 +110,25 @@ would be silent.
 
 ---
 
-## Roles become agents
+## Definitions become agents
 
-The first interview for a role creates its agent and never creates it again.
+On boot, each entry becomes an agent — or is adopted if one with that name
+already exists, so restarting never makes a second copy.
 
 ```js
 await whissle.agents.create({
-  name: `Interview — ${role.title}`,
-  agentType: "skills_exam",
-  systemPrompt: interviewerPrompt(role),   // your rules for the conversation
-  scoring_prompt: scoringPrompt(role),     // your rubric
+  name: def.name,
+  agentType: def.type,
+  systemPrompt: def.interview ? interviewPrompt(def) : def.prompt,
+  scoring_prompt: interviewRubric(def),      // graded agents only
 });
 await whissle.embed.enable(agent.id, { origins: [...] });
-await whissle.kb.addSnippet(agent.id, role.reference, `${role.title} — reference`);
+await whissle.kb.addSnippet(agent.id, def.knowledge, `${def.name} — reference`);
 ```
+
+Adoption matches on **name**, so an agent your workspace already has under the
+same name is reused rather than duplicated — and its sessions show up in this
+app's history. Rename in `agents.json` if you want a separate one.
 
 Two things that surprise people:
 
@@ -103,12 +140,28 @@ Two things that surprise people:
   origin list even though a secret-key mint ignores origins. Supply the hosts
   your app runs on.
 
-The knowledge base is what makes an examiner know *your* trade rather than
-trades in general. Ask this one a food-safety question and it answers with the
-temperatures from `roles.json`, because they are in its knowledge — not because
-a model happened to remember them.
+The knowledge base is what makes an agent know *your* domain rather than the
+domain in general. Ask the line-cook examiner a food-safety question and it
+answers with the temperatures from `agents.json`, because they are in its
+knowledge — not because a model happened to remember them.
 
 ---
+
+## A face, or not
+
+The avatar is rendered in the browser, so whether a call has one is a decision
+the page makes — same agent, same session, one option different:
+
+```js
+new WhissleAgent({
+  getToken,
+  ...(withAvatar ? { avatar: { id: "F2-TL", container: faceEl } } : {}),
+});
+```
+
+The container must exist **before** `start()`. If the face fails to come up the
+call continues audio-only and you get `avatar-failed` — a missing face should
+never cost someone the conversation.
 
 ## The agent drives your UI
 
@@ -132,14 +185,14 @@ supervisor's dashboard.
 
 ## Making it yours
 
-1. **Replace `roles.json`.** An interview platform for accountants is this code
-   with different rows.
-2. **Rewrite the two prompts in `server.mjs`.** How strict the examiner is, what
-   the rubric rewards.
-3. **Swap `candidateFrom()` for real authentication.** It is a header today. It
-   only has to answer *who is this, and may they interview for this role* —
-   which is exactly why the key lives on your side.
-4. **Put the `agents` Map in your database** so agents survive a restart.
+1. **Replace `agents.json`.** An app for accountants, or for triage nurses, is
+   this code with different entries.
+2. **Rewrite the prompt builders in `server.mjs`.** How strict an examiner is,
+   what the rubric rewards.
+3. **Swap `userFrom()` for real authentication.** It is a header today. It only
+   has to answer *who is this, and may they talk to this agent* — which is
+   exactly why the key lives on your side.
+4. **Put the `provisioned` Map in your database** so agents survive a restart.
 
 Everything else can stay.
 
@@ -147,7 +200,12 @@ Everything else can stay.
 
 ## Reading what happened
 
-Scoring runs after the call ends, so `ready: false` is a normal answer — poll it.
+The **Sessions** view is `whissle.calls.list()` filtered to this app's agents,
+with `calls.get()` for the transcript and `calls.result()` for the score.
+Scoring runs after a call ends, so `ready: false` is a normal answer, not a
+failure — the page shows it as pending.
+
+The same data from a terminal:
 
 ```bash
 whissle calls list --limit 10

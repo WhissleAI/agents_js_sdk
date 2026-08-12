@@ -1,0 +1,73 @@
+[
+  {
+    "id": "electrician",
+    "name": "Interview — Electrician",
+    "type": "skills_exam",
+    "avatar": "F1-HR",
+    "summary": "Trade interview for domestic and light-industrial electrical work.",
+    "interview": {
+      "level": "entry",
+      "skills": [
+        "Wiring and circuit installation",
+        "Fault diagnosis and testing",
+        "Electrical safety and earthing",
+        "Reading wiring diagrams",
+        "Instruments (multimeter, insulation tester)"
+      ],
+      "questions": [
+        "Walk me through wiring a single-phase domestic distribution board.",
+        "A ceiling fan runs slowly on every regulator setting. How do you diagnose it?",
+        "What is earthing for, and how would you test whether an earth is good?",
+        "Explain the difference between an MCB and an RCD, and when you'd use each.",
+        "You measure 230 V between live and neutral but the appliance won't run. What next?",
+        "What PPE do you put on before opening a live board, and why each item?"
+      ]
+    },
+    "knowledge": "Every candidate should be able to state, unprompted: isolate, lock off, and TEST DEAD before touching any conductor — proving the tester on a known live source, testing the conductor, then proving the tester again. Earthing exists so fault current has a low-resistance path and the protective device operates; a high-resistance earth is a dangerous earth, not a weak one. An MCB protects the CIRCUIT from overload and short circuit; an RCD protects the PERSON from earth leakage. They are not substitutes."
+  },
+  {
+    "id": "line-cook",
+    "name": "Interview — Line Cook",
+    "type": "skills_exam",
+    "avatar": "F2-TL",
+    "summary": "Trade interview for a busy service line.",
+    "interview": {
+      "level": "entry",
+      "skills": [
+        "Knife skills and prep consistency",
+        "Cooking to temperature and doneness",
+        "Food safety and HACCP",
+        "Station organisation (mise en place)",
+        "Working the pass under pressure"
+      ],
+      "questions": [
+        "Talk me through setting up your mise en place before a dinner service.",
+        "What are the safe internal temperatures for chicken, beef and fish?",
+        "You're four tickets behind and the pass is calling. What do you do?",
+        "Explain the danger zone and how you keep prepped food out of it.",
+        "A dish comes back to the kitchen. Walk me through your response.",
+        "How do you prevent cross-contamination when you're moving fast?"
+      ]
+    },
+    "knowledge": "Poultry to 74 °C, ground meat 71 °C, whole cuts 63 °C, fish 63 °C. The danger zone is 5–60 °C; food should not sit in it beyond four hours cumulatively. Colour-coded boards and a sanitiser bucket within reach are the two habits that prevent most cross-contamination. A returned dish is remade, not argued about — the response to listen for is ownership plus a check of whether the whole batch is affected."
+  },
+  {
+    "id": "coach",
+    "name": "Interview coach",
+    "type": "ai_tutor",
+    "avatar": "M1-HR",
+    "summary": "Talks through what went wrong after an interview. Teaches rather than tests.",
+    "prompt": "You are an interview coach. Candidates come to you after an interview that did not go well, so open by asking which part felt hardest — then teach that ONE thing before moving on. Explain simply, check understanding with a short question, and be specific about what a strong answer contains. Keep turns to one to three sentences: this is a spoken conversation, not an essay.",
+    "greeting": "Hi — I'm your coach. Tell me which part of the interview felt hardest and we'll start there.",
+    "knowledge": "A strong interview answer is concrete before it is general: name the situation, what you did, and what happened. Candidates lose marks far more often for vagueness than for being wrong. When someone does not know an answer, the best response is to say so and then reason aloud toward what they would do — silence and guessing both score worse than honest reasoning."
+  },
+  {
+    "id": "receptionist",
+    "name": "Scheduling assistant",
+    "type": "general",
+    "summary": "Voice-only. Shows the same code running without an avatar.",
+    "prompt": "You are a friendly scheduling assistant for a training centre. Help callers find a time for their assessment, confirm what they need to bring, and answer questions about the centre. Keep replies short and natural for speech — no lists read aloud, no markdown.",
+    "greeting": "Hello! I can help you book an assessment or answer questions about the centre. What do you need?",
+    "knowledge": "Assessments run Monday to Friday, 9am to 4pm, and take about ninety minutes. Candidates should bring photo ID and their enrolment number. The centre is a ten-minute walk from the station; parking is free but limited to twenty spaces. Rescheduling is free with 24 hours' notice."
+  }
+]
