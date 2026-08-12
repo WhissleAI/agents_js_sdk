@@ -1,0 +1,13 @@
+{
+  "name": "whissle-interview-platform-example",
+  "private": true,
+  "type": "module",
+  "description": "A complete interview platform on Whissle — roles become agents, the browser holds no key.",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "@whissle/sdk": "^0.2.0"
+  },
+  "engines": { "node": ">=20" }
+}
