@@ -85,14 +85,14 @@ in fifteen minutes.
 ```js
 // server — behind YOUR auth
 const session = await whissle.embed.sessionToken(agentId, {
-  metadata: { candidate, role },      // yours; lands on the call record
+  metadata: { user, agent },          // yours; lands on the call record
 });
 ```
 
 ```js
 // browser — no key
 new WhissleAgent({
-  getToken: () => fetch("/api/interviews", { method: "POST", … }).then((r) => r.json()),
+  getToken: () => fetch("/api/sessions", { method: "POST", … }).then((r) => r.json()),
 });
 ```
 
@@ -189,10 +189,10 @@ supervisor's dashboard.
    this code with different entries.
 2. **Rewrite the prompt builders in `server.mjs`.** How strict an examiner is,
    what the rubric rewards.
-3. **Swap `candidateFrom()` for real authentication.** It is a header today. It
-   only has to answer *who is this, and may they interview for this role* —
-   which is exactly why the key lives on your side.
-4. **Put the `agents` Map in your database** so agents survive a restart.
+3. **Swap `userFrom()` for real authentication.** It is a header today. It only
+   has to answer *who is this, and may they talk to this agent* — which is
+   exactly why the key lives on your side.
+4. **Put the `provisioned` Map in your database** so agents survive a restart.
 
 Everything else can stay.
 
