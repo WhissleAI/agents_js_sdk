@@ -20,7 +20,7 @@
  */
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
-import { dirname, extname, join } from "node:path";
+import { dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WhissleClient } from "@whissle/sdk";
 
@@ -240,14 +240,30 @@ createServer(async (req, res) => {
   }
 
   // Static: the single page and its assets.
-  const file = path === "/" ? "/index.html" : path;
+  //
+  // Read the file BEFORE writing a status. Writing 200 first and then discovering
+  // the file is missing leaves nothing to say 404 with — the second writeHead
+  // throws ERR_HTTP_HEADERS_SENT, and an uncaught throw in a request handler takes
+  // the whole server down. A browser asks for /favicon.ico unprompted, so that is
+  // not a hypothetical.
+  //
+  // resolve() then a prefix check, because `path` is whatever the client sent:
+  // join(here, "/../../etc/passwd") happily walks out of this directory.
+  const file = resolve(here, "." + (path === "/" ? "/index.html" : path));
+  if (!file.startsWith(here + sep)) {
+    res.writeHead(403).end("Forbidden");
+    return;
+  }
+  let body;
   try {
-    const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css" };
-    res.writeHead(200, { "content-type": types[extname(file)] ?? "text/plain" });
-    res.end(readFileSync(join(here, file)));
+    body = readFileSync(file);
   } catch {
     res.writeHead(404).end("Not found");
+    return;
   }
+  const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css" };
+  res.writeHead(200, { "content-type": types[extname(file)] ?? "text/plain" });
+  res.end(body);
 }).listen(PORT, async () => {
   console.log(`\n  Whissle example app → http://localhost:${PORT}\n`);
   await provisionAll();

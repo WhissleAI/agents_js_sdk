@@ -99,6 +99,7 @@
         <label class="toggle"><input type="checkbox" id="wantAvatar" checked /> Show the avatar</label>
         <div class="controls">
           <button class="act" id="mute" hidden>Mute</button>
+          <button class="act" id="wrap" hidden>Wrap up</button>
           <button class="act stop" id="end" hidden>End call</button>
         </div>
         <div class="err" id="err"></div>
@@ -116,9 +117,18 @@
   </section>
 </main>
 
-<!-- One file, no build step. The same package you would npm install. -->
+<!--
+  One file, no build step — so the browser loads @whissle/agents straight from a
+  CDN rather than through a bundler.
+
+  It has to be esm.sh, not unpkg. The published dist imports its dependency by
+  bare name ("@pipecat-ai/client-js"), which a bundler resolves and a browser
+  cannot: fetched raw, the module throws "Failed to resolve module specifier"
+  before a line of it runs. esm.sh rewrites those specifiers to real URLs.
+  In an app with a build step, `npm i @whissle/agents` and import it by name.
+-->
 <script type="module">
-import { WhissleAgent } from "https://unpkg.com/@whissle/agents@0.4/dist/index.js";
+import { WhissleAgent } from "https://esm.sh/@whissle/agents@0.4";
 
 const $ = (id) => document.getElementById(id);
 const api = (p, o) => fetch(p, o).then(async (r) => {
@@ -141,7 +151,15 @@ function show(view) {
 }
 
 // ── agents ───────────────────────────────────────────────────────────────────
-agents = await api("/api/agents");
+// Top-level await, so an unhandled throw here would stop the rest of this module
+// from ever running — leaving a blank page wired to nothing, with no clue why.
+let loadError = null;
+try {
+  agents = await api("/api/agents");
+} catch (e) {
+  loadError = e;
+}
+
 $("agents").innerHTML = agents.map((a) => `
   <button class="card" data-id="${a.id}">
     <h2>${a.name}</h2>
@@ -151,8 +169,14 @@ $("agents").innerHTML = agents.map((a) => `
       ${a.avatar ? `<span class="chip">avatar ${a.avatar}</span>` : `<span class="chip">voice only</span>`}
       ${a.questions.length ? `<span class="chip">${a.questions.length} questions</span>` : ""}
     </div>
-  </button>`).join("") || `<p class="empty">No agents provisioned. Check the server log.</p>`;
+  </button>`).join("");
 for (const el of document.querySelectorAll("#agents .card")) el.onclick = () => start(el.dataset.id);
+
+if (!agents.length) {
+  $("agents").append(empty(loadError
+    ? `Could not reach the server — ${loadError.message ?? loadError}`
+    : "No agents provisioned. Check the server log."));
+}
 
 // ── a live call ──────────────────────────────────────────────────────────────
 async function start(id) {
@@ -212,7 +236,7 @@ async function start(id) {
 
   try {
     await agent.start();               // asks for the microphone, then connects
-    $("mute").hidden = false; $("end").hidden = false;
+    $("mute").hidden = false; $("wrap").hidden = false; $("end").hidden = false;
     $("question").textContent = def.name;
   } catch (e) {
     note(String(e?.message ?? e));
@@ -225,12 +249,19 @@ $("mute").onclick = () => {
   muted = !muted; agent?.setMuted(muted);
   $("mute").textContent = muted ? "Unmute" : "Mute";
 };
-// Asking an agent to wrap up is a message YOUR prompt taught it to understand.
-$("end").onclick = () => { agent?.send("wrap-up"); stop(); };
+// Two different things, and the difference is the point of `send()`.
+//
+// "Wrap up" asks the agent to finish: it says its closing line and then sends the
+// {"t":"complete"} its prompt taught it to send, which is what ends the call. The
+// message is only worth sending if you then let the agent act on it — sending it
+// and hanging up in the same breath is the same as hanging up.
+$("wrap").onclick = () => { agent?.send("wrap-up"); $("wrap").hidden = true; };
+// "End call" is the hang-up: no closing line, no grading prompt, gone.
+$("end").onclick = () => stop();
 
 function stop() {
   agent?.stop(); agent = null;
-  $("mute").hidden = true; $("end").hidden = true;
+  $("mute").hidden = true; $("wrap").hidden = true; $("end").hidden = true;
   setState("ended");
 }
 function reset() {
@@ -261,21 +292,50 @@ async function loadSessions() {
 async function openSession(id) {
   $("detail").innerHTML = `<p class="empty">Loading session…</p>`;
   const { call, result } = await api(`/api/sessions/${id}`);
-  const turns = (call.transcript ?? [])
-    .map((t) => `<div class="turn"><div class="who">${t.role === "assistant" ? "Agent" : "You"}</div>${
-      typeof t.content === "string" ? t.content : JSON.stringify(t.content)}</div>`).join("")
-    || `<p class="empty">No transcript recorded.</p>`;
+  // Everything below is built as DOM rather than interpolated into innerHTML.
+  // A transcript is whatever a caller said, and a score is whatever a model
+  // wrote — neither is yours, so neither is ever markup.
+  $("detail").innerHTML = "";
+  $("detail").append(heading("Transcript"));
+
+  const box = document.createElement("div");
+  box.className = "transcript";
+  const turns = call.transcript ?? [];
+  if (!turns.length) box.append(empty("No transcript recorded."));
+  for (const t of turns) {
+    const el = document.createElement("div");
+    el.className = "turn";
+    el.innerHTML = `<div class="who"></div><div class="t"></div>`;
+    el.querySelector(".who").textContent = t.role === "assistant" ? "Agent" : "You";
+    el.querySelector(".t").textContent =
+      typeof t.content === "string" ? t.content : JSON.stringify(t.content);
+    box.append(el);
+  }
+  $("detail").append(box, heading("Score"));
+
   // `ready: false` is a normal answer, not an error — scoring runs after the call.
-  const score = !result ? `<p class="empty">No result available.</p>`
-    : !result.ready ? `<p class="empty">Still scoring — this finishes shortly after the call ends.</p>`
-    : `<pre>${JSON.stringify(result.result ?? result, null, 2)}</pre>`;
-  $("detail").innerHTML =
-    `<h2 style="font-size:15px;margin:22px 0 8px">Transcript</h2>
-     <div class="transcript">${turns}</div>
-     <h2 style="font-size:15px;margin:22px 0 8px">Score</h2>${score}`;
+  if (!result) $("detail").append(empty("No result available."));
+  else if (!result.ready) $("detail").append(empty("Still scoring — this finishes shortly after the call ends."));
+  else {
+    const pre = document.createElement("pre");
+    pre.textContent = JSON.stringify(result.result ?? result, null, 2);
+    $("detail").append(pre);
+  }
 }
 
 // ── small view helpers ───────────────────────────────────────────────────────
+function heading(text) {
+  const h = document.createElement("h2");
+  h.style.cssText = "font-size:15px;margin:22px 0 8px";
+  h.textContent = text;
+  return h;
+}
+function empty(text) {
+  const p = document.createElement("p");
+  p.className = "empty";
+  p.textContent = text;
+  return p;
+}
 function setState(text, kind) {
   $("state").textContent = text;
   $("dot").className = "dot" + (kind === "talk" ? " talk"
