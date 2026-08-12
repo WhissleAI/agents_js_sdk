@@ -71,7 +71,7 @@ export interface WhissleAgentOptions {
    * already names the agent.
    */
   getToken?: () => string | WhissleSessionInfo | Promise<string | WhissleSessionInfo>;
-  /** The agent to talk to (from platform.whissle.ai). Not needed with a token. */
+  /** The agent to talk to (from whissle.ai). Not needed with a token. */
   agentId?: string;
   /** Override the API base URL (self-hosted / staging). */
   baseUrl?: string;

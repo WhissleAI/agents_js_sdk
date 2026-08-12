@@ -1,7 +1,7 @@
 # @whissle/agents
 
 Embed a **Whissle voice agent** — with or without a talking avatar — into any web
-app. Build or configure the agent on [platform.whissle.ai](https://platform.whissle.ai),
+app. Build or configure the agent on [whissle.ai](https://whissle.ai),
 grab a key, and run a live spoken conversation in the browser: as a ready-made
 widget or wired into your own UI.
 
@@ -11,7 +11,7 @@ the origins you allow and only authorizes a session with the agent you chose.
 
 ## The flow
 
-1. **Create or configure an agent** on platform.whissle.ai (e.g. an AI Tutor,
+1. **Create or configure an agent** on whissle.ai (e.g. an AI Tutor,
    receptionist, or your own).
 2. Open the agent → **Embed & SDK** → turn on embedding, add the site(s) allowed
    to use it, and copy your **publishable key**.
