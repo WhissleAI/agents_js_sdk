@@ -3,177 +3,217 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Interview platform — @whissle/agents</title>
+<title>Whissle example app</title>
 <style>
   :root {
-    --ink: #16132b; --muted: #6b6785; --rule: #e4e1dc;
-    --paper: #faf9f6; --card: #fff; --accent: #e5484d; --ok: #2f7d6b;
+    --ink: #16132b; --muted: #6b6785; --rule: #e4e1dc; --paper: #faf9f6;
+    --card: #fff; --accent: #e5484d; --ok: #2f7d6b; --chip: #f1efea;
   }
   @media (prefers-color-scheme: dark) {
-    :root { --ink: #eceaf7; --muted: #9691b5; --rule: #2c2752;
-            --paper: #131029; --card: #1b1738; --accent: #ff6b6f; --ok: #5fbfa6; }
+    :root { --ink: #eceaf7; --muted: #9691b5; --rule: #2c2752; --paper: #131029;
+            --card: #1b1738; --accent: #ff6b6f; --ok: #5fbfa6; --chip: #241f47; }
   }
   * { box-sizing: border-box; }
-  body {
-    margin: 0; background: var(--paper); color: var(--ink);
-    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  body { margin: 0; background: var(--paper); color: var(--ink);
+         font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 900px; margin: 0 auto; padding: 32px 20px 80px; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: -.01em; }
+  .sub { color: var(--muted); font-size: 13px; margin: 2px 0 0; }
+  header { display: flex; justify-content: space-between; align-items: baseline;
+           gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
+  nav { display: flex; gap: 4px; }
+  nav button {
+    font: inherit; font-size: 14px; padding: 6px 14px; border-radius: 999px;
+    border: 1px solid transparent; background: none; color: var(--muted); cursor: pointer;
   }
-  main { max-width: 880px; margin: 0 auto; padding: 40px 20px 80px; }
-  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -.01em; }
-  .sub { color: var(--muted); margin: 0 0 28px; }
-  .roles { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
-  .role {
-    text-align: left; background: var(--card); color: inherit;
-    border: 1px solid var(--rule); border-radius: 10px; padding: 16px; cursor: pointer;
-    font: inherit;
-  }
-  .role:hover, .role:focus-visible { border-color: var(--accent); outline: none; }
-  .role h2 { font-size: 15px; margin: 0 0 2px; }
-  .role p { font-size: 13px; color: var(--muted); margin: 0; }
+  nav button[aria-current="true"] { background: var(--card); border-color: var(--rule); color: var(--ink); }
 
-  .stage { display: none; grid-template-columns: 280px 1fr; gap: 24px; align-items: start; }
-  .stage.live { display: grid; }
-  @media (max-width: 720px) { .stage.live { grid-template-columns: 1fr; } }
+  .view { display: none; } .view.on { display: block; }
+  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); }
+  .card { background: var(--card); border: 1px solid var(--rule); border-radius: 10px; padding: 15px; }
+  button.card { text-align: left; font: inherit; color: inherit; cursor: pointer; width: 100%; }
+  button.card:hover, button.card:focus-visible { border-color: var(--accent); outline: none; }
+  .card h2 { font-size: 15px; margin: 0 0 3px; }
+  .card p { font-size: 13px; color: var(--muted); margin: 0; }
+  .chips { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+  .chip { font-size: 11px; background: var(--chip); color: var(--muted);
+          padding: 2px 8px; border-radius: 999px; font-family: ui-monospace, monospace; }
 
-  .face {
-    width: 100%; aspect-ratio: 1; border-radius: 14px; overflow: hidden;
-    background: var(--card); border: 1px solid var(--rule);
-    display: grid; place-items: center;
-  }
+  /* live call */
+  .stage { display: grid; grid-template-columns: 260px 1fr; gap: 22px; align-items: start; }
+  @media (max-width: 700px) { .stage { grid-template-columns: 1fr; } }
+  .face { width: 100%; aspect-ratio: 1; border-radius: 12px; overflow: hidden;
+          background: var(--card); border: 1px solid var(--rule); display: grid; place-items: center; }
   .face video { width: 100%; height: 100%; object-fit: cover; }
-  .face .placeholder { color: var(--muted); font-size: 13px; text-align: center; padding: 0 16px; }
-
-  .status { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); margin-top: 10px; }
-  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
-  .dot.on { background: var(--ok); }
-  .dot.talk { background: var(--accent); }
-
-  .question { font-size: 19px; font-weight: 600; line-height: 1.35; margin: 0 0 16px; min-height: 2.6em; }
-  .transcript {
-    border: 1px solid var(--rule); border-radius: 10px; background: var(--card);
-    padding: 14px; max-height: 46vh; overflow-y: auto; font-size: 14px;
-  }
-  .turn { margin-bottom: 10px; }
-  .who { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+  .face .ph { color: var(--muted); font-size: 12px; text-align: center; padding: 0 14px; }
+  .status { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--muted); margin-top: 10px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.on { background: var(--ok); } .dot.talk { background: var(--accent); }
+  .question { font-size: 18px; font-weight: 600; line-height: 1.35; margin: 0 0 14px; min-height: 1.4em; }
+  .transcript { border: 1px solid var(--rule); border-radius: 10px; background: var(--card);
+                padding: 13px; max-height: 44vh; overflow-y: auto; font-size: 14px; }
+  .turn { margin-bottom: 9px; }
+  .who { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
   .interim { color: var(--muted); font-style: italic; }
-
-  .controls { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
-  button.act {
-    font: inherit; padding: 8px 16px; border-radius: 999px; cursor: pointer;
-    border: 1px solid var(--rule); background: var(--card); color: inherit;
-  }
+  .controls { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+  button.act { font: inherit; font-size: 14px; padding: 7px 15px; border-radius: 999px;
+               cursor: pointer; border: 1px solid var(--rule); background: var(--card); color: inherit; }
   button.act.stop { color: var(--accent); border-color: var(--accent); }
-  .err { color: var(--accent); font-size: 13px; margin-top: 12px; }
-  .report { white-space: pre-wrap; font-size: 13px; background: var(--card);
-            border: 1px solid var(--rule); border-radius: 10px; padding: 14px; margin-top: 16px; }
+  label.toggle { display: inline-flex; align-items: center; gap: 7px; font-size: 13px;
+                 color: var(--muted); margin-top: 12px; cursor: pointer; }
+  .err { color: var(--accent); font-size: 13px; margin-top: 10px; }
+
+  /* sessions */
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--rule); }
+  th { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+  tr.row { cursor: pointer; } tr.row:hover { background: var(--card); }
+  pre { background: var(--card); border: 1px solid var(--rule); border-radius: 10px;
+        padding: 13px; overflow-x: auto; font-size: 12px; }
+  .empty { color: var(--muted); font-size: 14px; padding: 24px 0; }
 </style>
 </head>
 <body>
 <main>
-  <h1>Interview platform</h1>
-  <p class="sub">Pick a role. The examiner is a Whissle agent, provisioned from that role's definition.</p>
-
-  <div class="roles" id="roles"></div>
-
-  <section class="stage" id="stage">
+  <header>
     <div>
-      <div class="face" id="face"><span class="placeholder">The examiner's face appears here</span></div>
-      <div class="status">
-        <span class="dot" id="dot"></span>
-        <span id="state">idle</span>
-      </div>
-      <div class="controls">
-        <button class="act" id="mute" hidden>Mute</button>
-        <button class="act stop" id="end" hidden>End interview</button>
-      </div>
-      <div class="err" id="err"></div>
+      <h1>Whissle example app</h1>
+      <p class="sub">Agents from <code>agents.json</code> · voice with or without a face · past sessions</p>
     </div>
+    <nav>
+      <button data-view="agents" aria-current="true">Agents</button>
+      <button data-view="call">Call</button>
+      <button data-view="sessions">Sessions</button>
+    </nav>
+  </header>
 
-    <div>
-      <p class="question" id="question"></p>
-      <div class="transcript" id="transcript"></div>
-      <div class="report" id="report" hidden></div>
+  <section class="view on" id="v-agents">
+    <div class="grid" id="agents"></div>
+  </section>
+
+  <section class="view" id="v-call">
+    <div class="stage">
+      <div>
+        <div class="face" id="face"><span class="ph">Pick an agent to start</span></div>
+        <div class="status"><span class="dot" id="dot"></span><span id="state">idle</span></div>
+        <label class="toggle"><input type="checkbox" id="wantAvatar" checked /> Show the avatar</label>
+        <div class="controls">
+          <button class="act" id="mute" hidden>Mute</button>
+          <button class="act stop" id="end" hidden>End call</button>
+        </div>
+        <div class="err" id="err"></div>
+      </div>
+      <div>
+        <p class="question" id="question"></p>
+        <div class="transcript" id="transcript"></div>
+      </div>
     </div>
+  </section>
+
+  <section class="view" id="v-sessions">
+    <div id="sessions"></div>
+    <div id="detail"></div>
   </section>
 </main>
 
-<!-- One file, no build step. Same package you'd npm install. -->
+<!-- One file, no build step. The same package you would npm install. -->
 <script type="module">
 import { WhissleAgent } from "https://unpkg.com/@whissle/agents@0.4/dist/index.js";
 
 const $ = (id) => document.getElementById(id);
-let agent = null;
+const api = (p, o) => fetch(p, o).then(async (r) => {
+  const b = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(b.error ?? `${p} → ${r.status}`);
+  return b;
+});
 
-// ── choose a role ────────────────────────────────────────────────────────────
-const roles = await (await fetch("/api/roles")).json();
-$("roles").innerHTML = roles
-  .map((r) => `<button class="role" data-id="${r.id}">
-       <h2>${r.title}</h2><p>${r.description.slice(0, 90)}…</p></button>`)
-  .join("");
-for (const el of document.querySelectorAll(".role")) {
-  el.onclick = () => start(el.dataset.id);
+let agent = null, agents = [];
+
+// ── navigation ───────────────────────────────────────────────────────────────
+for (const b of document.querySelectorAll("nav button")) {
+  b.onclick = () => show(b.dataset.view);
+}
+function show(view) {
+  for (const b of document.querySelectorAll("nav button"))
+    b.setAttribute("aria-current", String(b.dataset.view === view));
+  for (const s of document.querySelectorAll(".view")) s.classList.toggle("on", s.id === `v-${view}`);
+  if (view === "sessions") loadSessions();
 }
 
-// ── run the interview ────────────────────────────────────────────────────────
-async function start(roleId) {
-  $("roles").hidden = true;
-  $("stage").classList.add("live");
+// ── agents ───────────────────────────────────────────────────────────────────
+agents = await api("/api/agents");
+$("agents").innerHTML = agents.map((a) => `
+  <button class="card" data-id="${a.id}">
+    <h2>${a.name}</h2>
+    <p>${a.summary ?? ""}</p>
+    <div class="chips">
+      <span class="chip">${a.type}</span>
+      ${a.avatar ? `<span class="chip">avatar ${a.avatar}</span>` : `<span class="chip">voice only</span>`}
+      ${a.questions.length ? `<span class="chip">${a.questions.length} questions</span>` : ""}
+    </div>
+  </button>`).join("") || `<p class="empty">No agents provisioned. Check the server log.</p>`;
+for (const el of document.querySelectorAll("#agents .card")) el.onclick = () => start(el.dataset.id);
+
+// ── a live call ──────────────────────────────────────────────────────────────
+async function start(id) {
+  const def = agents.find((a) => a.id === id);
+  show("call");
+  reset();
   setState("connecting");
+
+  // The avatar is browser-rendered, so whether you get a face is a decision the
+  // page makes per call. The same agent, the same session — one line different.
+  const withAvatar = $("wantAvatar").checked && def.avatar;
+  $("face").innerHTML = withAvatar
+    ? `<span class="ph">Bringing up the face…</span>`
+    : `<span class="ph">Voice only</span>`;
 
   agent = new WhissleAgent({
     /**
      * The whole point. The browser holds no Whissle key: it asks OUR server,
-     * which decides who this candidate is and mints a session for one agent.
+     * which decides who this user is and mints a session for one agent.
      *
      * Returning the entire mint response — not just `.token` — is what lets the
      * SDK follow the transport the platform advertises and use the ICE servers
      * belonging to the box on the other end of the connection.
      */
-    getToken: async () => {
-      const res = await fetch("/api/interviews", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ role: roleId }),
-      });
-      if (!res.ok) throw new Error((await res.json()).error ?? `start failed (${res.status})`);
-      const session = await res.json();
-      $("question").textContent = `Interviewing for ${session.role}`;
-      return session;
-    },
-    // A talking face, rendered in the browser straight from the provider — so
-    // Whissle does no video transcoding. Drop this line for voice only.
-    avatar: { id: "F1-HR", container: $("face") },
+    getToken: () => api("/api/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ agent: id }),
+    }),
+    ...(withAvatar ? { avatar: { id: def.avatar, container: $("face") } } : {}),
   });
 
   agent
     .on("connected", () => setState("connected"))
     .on("bot-ready", () => setState("listening"))
-    .on("avatar-ready", () => $("face").querySelector(".placeholder")?.remove())
-    // A face that won't start must never cost you the interview: the session
-    // carries on, audio only.
-    .on("avatar-failed", (why) => note(`Avatar unavailable — continuing with audio. ${why ?? ""}`))
-    .on("speaking-started", () => setState("examiner speaking", "talk"))
+    .on("avatar-ready", () => $("face").querySelector(".ph")?.remove())
+    // A face that won't start must never cost you the call: it carries on, audio only.
+    .on("avatar-failed", (why) => { $("face").innerHTML = `<span class="ph">Audio only</span>`;
+                                    note(`Avatar unavailable — continuing with audio. ${why ?? ""}`); })
+    .on("speaking-started", () => setState("agent speaking", "talk"))
     .on("speaking-stopped", () => setState("listening"))
-    .on("agent-transcript", (t) => addTurn("Examiner", t))
-    .on("user-transcript", (t) => { clearInterim(); addTurn("You", t); })
-    // Their words as they're still being recognised. Without this, a candidate
-    // talking to a silent screen assumes they aren't heard and starts over.
+    .on("agent-transcript", (t) => addTurn("Agent", t))
+    .on("user-transcript", (t) => addTurn("You", t))
+    // Their words while still being recognised. Without this, someone talking to
+    // a silent screen assumes they aren't heard and starts the sentence over.
     .on("user-interim", (t) => showInterim(t))
     .on("mic-lost", () => note("Your microphone stopped. Check it's still connected."))
     .on("mic-restored", () => note(""))
     // Anything the SDK doesn't consume: OUR events, defined by the prompt in
-    // server.mjs. This is how the agent drives your UI.
+    // server.mjs. This is how an agent drives your interface.
     .on("server-message", (m) => {
       if (m?.t === "question") $("question").textContent = m.text;
-      if (m?.t === "complete") finish();
+      if (m?.t === "complete") stop();
     })
     .on("error", (e) => note(String(e)))
     .on("disconnected", () => setState("ended"));
 
   try {
-    await agent.start();          // asks for the microphone, then connects
-    $("mute").hidden = false;
-    $("end").hidden = false;
+    await agent.start();               // asks for the microphone, then connects
+    $("mute").hidden = false; $("end").hidden = false;
+    $("question").textContent = def.name;
   } catch (e) {
     note(String(e?.message ?? e));
     setState("idle");
@@ -182,61 +222,84 @@ async function start(roleId) {
 
 let muted = false;
 $("mute").onclick = () => {
-  muted = !muted;
-  agent?.setMuted(muted);
+  muted = !muted; agent?.setMuted(muted);
   $("mute").textContent = muted ? "Unmute" : "Mute";
 };
+// Asking an agent to wrap up is a message YOUR prompt taught it to understand.
+$("end").onclick = () => { agent?.send("wrap-up"); stop(); };
 
-// Asking the agent to wrap up is a message YOUR prompt taught it to understand.
-$("end").onclick = () => { agent?.send("wrap-up"); finish(); };
-
-async function finish() {
-  $("end").hidden = true;
-  $("mute").hidden = true;
-  agent?.stop();
+function stop() {
+  agent?.stop(); agent = null;
+  $("mute").hidden = true; $("end").hidden = true;
   setState("ended");
-  $("report").hidden = false;
-  $("report").textContent = "Scoring runs after the call ends — fetching…";
-  // `ready:false` is a normal answer, not an error, so poll rather than give up.
-  for (let i = 0; i < 10; i++) {
-    await new Promise((r) => setTimeout(r, 3000));
-    const calls = await (await fetch("/api/interviews")).json();
-    const mine = calls[0];
-    if (mine?.disposition || mine?.metadata?.session_summary) {
-      $("report").textContent = JSON.stringify(mine.metadata?.session_summary ?? mine, null, 2);
-      return;
-    }
+}
+function reset() {
+  $("transcript").innerHTML = ""; $("question").textContent = ""; note("");
+  muted = false; $("mute").textContent = "Mute";
+}
+
+// ── sessions ─────────────────────────────────────────────────────────────────
+async function loadSessions() {
+  $("detail").innerHTML = "";
+  $("sessions").innerHTML = `<p class="empty">Loading…</p>`;
+  const rows = await api("/api/sessions").catch((e) => { note(String(e)); return []; });
+  if (!rows.length) {
+    $("sessions").innerHTML = `<p class="empty">No sessions yet — have a call and come back.</p>`;
+    return;
   }
-  $("report").textContent = "Still finalising. Try: whissle calls result <id> --wait";
+  $("sessions").innerHTML = `<table>
+    <thead><tr><th>When</th><th>Agent</th><th>Status</th><th>Length</th></tr></thead>
+    <tbody>${rows.map((c) => `<tr class="row" data-id="${c.id}">
+      <td>${new Date(c.created_at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</td>
+      <td>${c.agentName ?? "—"}</td>
+      <td>${c.status ?? "—"}</td>
+      <td>${c.duration_sec != null ? c.duration_sec + "s" : "—"}</td>
+    </tr>`).join("")}</tbody></table>`;
+  for (const tr of document.querySelectorAll("#sessions tr.row")) tr.onclick = () => openSession(tr.dataset.id);
+}
+
+async function openSession(id) {
+  $("detail").innerHTML = `<p class="empty">Loading session…</p>`;
+  const { call, result } = await api(`/api/sessions/${id}`);
+  const turns = (call.transcript ?? [])
+    .map((t) => `<div class="turn"><div class="who">${t.role === "assistant" ? "Agent" : "You"}</div>${
+      typeof t.content === "string" ? t.content : JSON.stringify(t.content)}</div>`).join("")
+    || `<p class="empty">No transcript recorded.</p>`;
+  // `ready: false` is a normal answer, not an error — scoring runs after the call.
+  const score = !result ? `<p class="empty">No result available.</p>`
+    : !result.ready ? `<p class="empty">Still scoring — this finishes shortly after the call ends.</p>`
+    : `<pre>${JSON.stringify(result.result ?? result, null, 2)}</pre>`;
+  $("detail").innerHTML =
+    `<h2 style="font-size:15px;margin:22px 0 8px">Transcript</h2>
+     <div class="transcript">${turns}</div>
+     <h2 style="font-size:15px;margin:22px 0 8px">Score</h2>${score}`;
 }
 
 // ── small view helpers ───────────────────────────────────────────────────────
 function setState(text, kind) {
   $("state").textContent = text;
-  $("dot").className = "dot" + (kind === "talk" ? " talk" : text === "idle" || text === "ended" ? "" : " on");
+  $("dot").className = "dot" + (kind === "talk" ? " talk"
+    : ["idle", "ended"].includes(text) ? "" : " on");
 }
 function addTurn(who, text) {
   clearInterim();
   const el = document.createElement("div");
   el.className = "turn";
-  el.innerHTML = `<div class="who"></div><div class="text"></div>`;
+  el.innerHTML = `<div class="who"></div><div class="t"></div>`;
   el.querySelector(".who").textContent = who;
-  el.querySelector(".text").textContent = text;
+  el.querySelector(".t").textContent = text;      // textContent: never inject a transcript as HTML
   $("transcript").append(el);
   $("transcript").scrollTop = $("transcript").scrollHeight;
 }
 function showInterim(text) {
-  let el = document.getElementById("interim");
-  if (!el) {
-    el = document.createElement("div");
-    el.id = "interim"; el.className = "turn interim";
-    $("transcript").append(el);
-  }
+  let el = $("interim");
+  if (!el) { el = document.createElement("div"); el.id = "interim"; el.className = "turn interim";
+             $("transcript").append(el); }
   el.textContent = text;
   $("transcript").scrollTop = $("transcript").scrollHeight;
 }
-const clearInterim = () => document.getElementById("interim")?.remove();
-const note = (msg) => ($("err").textContent = msg);
+const clearInterim = () => $("interim")?.remove();
+const note = (m) => ($("err").textContent = m);
 </script>
 </body>
 </html>
