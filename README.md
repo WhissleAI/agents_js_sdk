@@ -17,6 +17,12 @@ the origins you allow and only authorizes a session with the agent you chose.
    to use it, and copy your **publishable key**.
 3. Drop the SDK into your site.
 
+## A complete example
+
+[`examples/interview-platform`](examples/interview-platform) is a working
+interview platform in ~250 lines — roles become agents, the server mints
+sessions, the browser holds no key. `npm install && npm start`.
+
 ## Install
 
 ```bash
