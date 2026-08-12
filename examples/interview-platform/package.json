@@ -2,7 +2,7 @@
   "name": "whissle-interview-platform-example",
   "private": true,
   "type": "module",
-  "description": "A complete interview platform on Whissle — roles become agents, the browser holds no key.",
+  "description": "A small but complete Whissle app — agents from a JSON file, live calls with or without a face, past sessions with transcripts and scores.",
   "scripts": {
     "start": "node server.mjs"
   },
