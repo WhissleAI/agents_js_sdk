@@ -8,6 +8,11 @@ import {
   type AvatarOptions,
 } from "./avatar";
 import { LiveKitSession, type LiveKitConnectInfo, type SessionCallbacks } from "./livekit";
+import {
+  attachBoostedPlayout,
+  primeBoostedPlayout,
+  teardownBoostedPlayout,
+} from "./mobile-audio";
 
 const DEFAULT_BASE_URL = "https://aws-gateway-backend.whissle.ai/bot";
 const DEFAULT_ICE = [
@@ -406,6 +411,11 @@ export class WhissleAgent {
   /** Ask for the microphone and connect the live session. */
   async start(): Promise<void> {
     if (this._state !== "idle") return;
+    // Before anything awaits: warm the mobile playout context. `start()` is called
+    // from the integrator's click handler, and starting the context here means it
+    // is running long before the agent's first words rather than racing them.
+    // No-op on desktop. See `./mobile-audio`.
+    primeBoostedPlayout();
     this._state = "connecting";
     this.emit("connecting");
     try {
@@ -555,7 +565,16 @@ export class WhissleAgent {
         // playing the raw track would double every word, half a beat apart.
         if (this.avatar) return;
         if (this.audioEl) {
-          this.audioEl.srcObject = new MediaStream([track]);
+          const stream = new MediaStream([track]);
+          this.audioEl.srcObject = stream;
+          // On a phone this element is too quiet to use — iOS caps it at the
+          // earpiece, Android hands it to the voice-call stream — so route the
+          // same stream through a boosted WebAudio graph and mute the element to
+          // avoid double playback. Desktop and any WebAudio failure leave the
+          // element playing exactly as before. Never reached with an avatar: Simli
+          // owns playback there, and its PCM comes off the data channel, not this
+          // track.
+          attachBoostedPlayout(stream, this.audioEl);
           this.audioEl.play().catch(() => {
             this.emit("error", "Browser blocked audio autoplay — a user gesture is required.");
           });
@@ -805,6 +824,7 @@ export class WhissleAgent {
     const avatar = this.avatar;
     this.avatar = null;
     await avatar?.destroy();
+    teardownBoostedPlayout();
     if (this.audioEl) {
       this.audioEl.srcObject = null;
       this.audioEl.remove();
