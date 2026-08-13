@@ -78,6 +78,30 @@ function loadLiveKit(): Promise<typeof import("livekit-client")> {
  * instead of a raw one. We translate those envelopes into the same callbacks
  * `PipecatClient` would have fired, so `WhissleAgent` cannot tell the difference.
  */
+/**
+ * Take a `server-message` payload out of pipecat's wrapper — and only out of it.
+ *
+ * Pipecat nests an application message one level deep, `{data: {…}}`, so the payload
+ * has to be lifted. Doing that on the mere PRESENCE of a `.data` key was wrong, and
+ * wrong in a way nothing could report: the live signal stream's envelope
+ * (`{kind:"signal", v:1, seq, t_ms, type, data:{…}}`) carries a `data` field of its
+ * own, so every signal was unwrapped a second time and delivered as its bare inner
+ * payload. Stripped of `kind` and `v`, `parseSignal()` correctly refused it, the
+ * `signal` event never fired, and an embedder on LiveKit — which is every production
+ * session — saw an empty stream while the pipeline was talking the whole time.
+ * `{kind:"tool", phase:"progress", data:{…}}` was losing its envelope the same way.
+ *
+ * So: unwrap only a bare wrapper — an object whose sole content is `data` and which
+ * carries none of the three discriminators the SDK routes on (`kind`, `t`, `type`).
+ */
+export function unwrapServerMessage(payload: unknown): unknown {
+  if (!payload || typeof payload !== "object") return payload;
+  const o = payload as Record<string, unknown>;
+  const wrapper =
+    "data" in o && o.kind === undefined && o.t === undefined && o.type === undefined;
+  return wrapper ? o.data : o;
+}
+
 export class LiveKitSession {
   private room: LiveKitRoom | null = null;
   private micEnabled = true;
@@ -215,8 +239,7 @@ export class LiveKitSession {
         cb.onUserStoppedSpeaking();
         break;
       case RTVIMessageType.SERVER_MESSAGE:
-        // Pipecat nests the payload one level deep under `data.data`.
-        cb.onServerMessage((data as { data?: unknown }).data ?? data);
+        cb.onServerMessage(unwrapServerMessage(data));
         break;
       case RTVIMessageType.ERROR:
         cb.onError(String(data.error ?? data.message ?? "Connection error."));

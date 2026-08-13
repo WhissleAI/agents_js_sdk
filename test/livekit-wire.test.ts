@@ -215,6 +215,41 @@ describe("inbound: signals that were being dropped", () => {
     expect(seen).toEqual([{ kind: "tool", phase: "started", function_name: "x" }]);
   });
 
+  it("keeps a live-signal envelope, which carries a `data` field of its own", async () => {
+    // Observed on a real LiveKit session against the demo agent: every signal arrived
+    // as its bare inner payload — `{top_k:[…], top_label:"EMOTION_NEUTRAL"}` with no
+    // `kind` and no `v` — so `parseSignal` refused it and the `signal` event never
+    // fired at all. The envelope is the part a client routes on; it must survive.
+    const seen: unknown[] = [];
+    const { room } = await connected(noopCallbacks({ onServerMessage: (m) => seen.push(m) }));
+    const envelope = {
+      kind: "signal",
+      v: 1,
+      seq: 7,
+      t_ms: 4210,
+      type: "emotion",
+      subsystem: "whissle_metadata",
+      data: { top_k: [{ label: "EMOTION_ANGRY", p: 0.42 }], top_label: "EMOTION_ANGRY" },
+    };
+    inbound(room, { label: "rtvi-ai", type: RTVIMessageType.SERVER_MESSAGE, data: envelope });
+    expect(seen).toEqual([envelope]);
+  });
+
+  it("keeps a tool-progress envelope for the same reason", async () => {
+    const seen: unknown[] = [];
+    const { room } = await connected(noopCallbacks({ onServerMessage: (m) => seen.push(m) }));
+    const envelope = {
+      kind: "tool",
+      phase: "progress",
+      tool_call_id: "c1",
+      function_name: "search_web",
+      display: "Reading source 2 of 3…",
+      data: { step: 2 },
+    };
+    inbound(room, { label: "rtvi-ai", type: RTVIMessageType.SERVER_MESSAGE, data: envelope });
+    expect(seen).toEqual([envelope]);
+  });
+
   it("ignores a datagram from something else in the room", async () => {
     const seen: unknown[] = [];
     const { room } = await connected(noopCallbacks({ onServerMessage: (m) => seen.push(m) }));

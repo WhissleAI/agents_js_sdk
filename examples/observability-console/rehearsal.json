@@ -1,0 +1,8 @@
+{
+  "note": "A scripted take. `at` is ms after the session opens; `say` is what gets synthesised into `file` by `npm run rehearsal`. Three cues on purpose: one the agent answers from what it knows, one that must call a tool, and one placed while it is still talking so the barge-in lane has something in it.",
+  "cues": [
+    { "at": 7000,  "file": "r1.wav", "say": "Hi there. In one sentence, what does Whissle actually do?" },
+    { "at": 26000, "file": "r2.wav", "say": "What is the weather in San Francisco right now?" },
+    { "at": 44000, "file": "r3.wav", "say": "Sorry, hold on. What about London instead?" }
+  ]
+}
