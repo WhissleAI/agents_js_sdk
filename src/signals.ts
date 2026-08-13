@@ -84,6 +84,14 @@ export interface LiveSignal {
   outcome?: string;
   /** The event's own payload. Shape depends on `type`. */
   data?: unknown;
+  /**
+   * The envelope's schema version. `1` today.
+   *
+   * Exposed so a consumer who genuinely cares can branch. Most should not: the stream
+   * is documented additive-only, so a higher version means "the same events plus some
+   * you have never heard of", and the fields above keep their meanings.
+   */
+  version: number;
   raw: unknown;
 }
 
@@ -137,14 +145,32 @@ export function parseUserMetadata(message: unknown): UserMetadata | null {
   return { emotion, intent, raw: message };
 }
 
-/** Read a v1 live-signal envelope, or `null`. Legacy `kind:"signal"` without a `v` is
- *  a different schema and is deliberately not matched here. */
+/**
+ * Read a versioned live-signal envelope, or `null`.
+ *
+ * Two rules, and they point in opposite directions on purpose.
+ *
+ * A legacy `kind:"signal"` with NO `v` is refused: that is a different, off-by-default
+ * schema that happens to share the discriminator, and handing a caller two
+ * incompatible shapes under one event is how they end up with `undefined.seq` in
+ * production.
+ *
+ * A `v` ABOVE 1 is accepted. The bot documents this stream as additive only
+ * (`services/live_signals.py`), so a v2 is v1 plus fields we do not read — every
+ * property below still means what it means, and `raw` carries the rest. Refusing it
+ * would mute the `signal` event entirely on every embed already published the day the
+ * gateway bumps the number, which is a self-inflicted outage in exchange for nothing:
+ * a schema that ever breaks compatibility has to change the discriminator, not the
+ * version, precisely because clients in the wild cannot be upgraded first.
+ */
 export function parseSignal(message: unknown): LiveSignal | null {
   if (!message || typeof message !== "object") return null;
   const m = message as Record<string, unknown>;
-  if (m.kind !== "signal" || m.v !== 1 || typeof m.type !== "string") return null;
+  if (m.kind !== "signal" || typeof m.type !== "string") return null;
+  if (typeof m.v !== "number" || !Number.isFinite(m.v) || m.v < 1) return null;
   return {
     type: m.type,
+    version: m.v,
     subsystem: typeof m.subsystem === "string" ? m.subsystem : undefined,
     seq: typeof m.seq === "number" ? m.seq : undefined,
     tMs: typeof m.t_ms === "number" ? m.t_ms : undefined,

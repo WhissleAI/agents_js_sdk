@@ -27,6 +27,10 @@ import { WhissleClient } from "@whissle/sdk";
 const here = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4000);
 
+/** The published version to fall back to when this copy has no local SDK build.
+ *  Kept as a MAJOR.MINOR range so a patch release is picked up without an edit. */
+const SDK_VERSION = "0.5";
+
 const apiKey = process.env.WHISSLE_API_KEY;
 if (!apiKey) {
   console.error(
@@ -237,6 +241,27 @@ createServer(async (req, res) => {
     const status = err?.status || 500;
     console.error(`  ${status} ${err?.message ?? err}`);
     return json(res, status, { error: String(err?.message ?? err) });
+  }
+
+  // The SDK itself.
+  //
+  // This example lives INSIDE the SDK repo, so it serves the build sitting next to
+  // it. That is the point: `npm start` here exercises the code on this branch, in a
+  // real browser, rather than whatever npm last published — which is how a release
+  // reaches production having never been loaded by a browser at all.
+  //
+  // If there is no local build (someone copied this directory out on its own), fall
+  // through to the CDN. Both paths work; only the first one proves anything about
+  // the code you are editing.
+  if (path === "/sdk/index.js" || path === "/sdk/index.js.map") {
+    const local = resolve(here, "../..", "dist", path.slice("/sdk/".length));
+    try {
+      const body = readFileSync(local);
+      res.writeHead(200, { "content-type": "text/javascript" });
+      return res.end(body);
+    } catch {
+      return res.writeHead(302, { location: `https://esm.sh/@whissle/agents@${SDK_VERSION}` }).end();
+    }
   }
 
   // Static: the single page and its assets.

@@ -249,16 +249,60 @@ describe("the reply, as it happens", () => {
     expect(p.of("agent-transcript")).toEqual(["Hi there. How can I help?"]);
   });
 
-  it("does not emit a partial twice for the two copies of one sentence", () => {
-    // A gateway sends every sentence on both the LLM and the TTS stream. The partial
-    // must be one text growing, not two readings interleaved.
+  it("never interleaves the LLM and TTS copies of one reply", () => {
+    // A gateway aggregates the SAME reply twice — once off the LLM stream
+    // (`spoken:false`) and once off the TTS stream (`spoken:true`) — cut at the same
+    // places but arriving at different times. Appending both to one buffer is what
+    // made every reply appear two or three times over, interleaved.
+    //
+    // The old version of this test used the same string for both copies, so it could
+    // not have caught that: "Hi there." and "Hi there." concatenated wrongly still
+    // reads as a plausible answer. These differ, so a mixed buffer would spell it out.
     const p = new Probe();
     p.cb.onBotStartedSpeaking();
-    p.cb.onBotOutput("Hi there.", false);
-    p.cb.onBotOutput("Hi there.", true);
-    expect(p.of("agent-partial")).toEqual(["Hi there.", "Hi there."]);
+    p.cb.onBotOutput("The policy is thirty days.", false); // LLM, first
+    p.cb.onBotOutput("The policy is 30 days.", true); // TTS, same sentence
+    p.cb.onBotOutput("Anything else?", false);
+    p.cb.onBotOutput("Anything else?", true);
+
+    for (const partial of p.of("agent-partial")) {
+      expect(partial).not.toMatch(/thirty days.*30 days|30 days.*thirty days/);
+    }
     p.cb.onBotStoppedSpeaking();
-    expect(p.of("agent-transcript")).toEqual(["Hi there."]);
+    // One turn, one transcript, in the wording the listener actually heard.
+    expect(p.of("agent-transcript")).toEqual(["The policy is 30 days. Anything else?"]);
+  });
+
+  it("never lets a partial go backwards, even when the LLM copy arrives whole", () => {
+    // Straight off a live session with the production demo agent. The LLM stream
+    // delivered the entire greeting as ONE segment; the TTS stream then delivered the
+    // same greeting a WORD at a time. Preferring `spoken` unconditionally rendered the
+    // whole sentence and then replaced it with "Hey,", re-growing over two seconds —
+    // so anyone rendering `agent-partial` (which the README recommends as the thing to
+    // show mid-answer) watched the reply apparently delete itself.
+    const p = new Probe();
+    p.cb.onBotStartedSpeaking();
+    p.cb.onBotOutput("Hey, I'm Lulu. What's on your mind?", false); // whole, at once
+    for (const word of ["Hey,", "I'm", "Lulu.", "What's", "on", "your", "mind?"]) {
+      p.cb.onBotOutput(word, true); // …then word by word
+    }
+    const partials = p.of("agent-partial") as string[];
+    expect(partials[0]).toBe("Hey, I'm Lulu. What's on your mind?");
+    // Monotone: every partial is at least as long as the one before it.
+    for (let i = 1; i < partials.length; i++) {
+      expect(partials[i].length).toBeGreaterThan(partials[i - 1].length);
+    }
+    // And nothing was emitted just to say the same thing again.
+    expect(new Set(partials).size).toBe(partials.length);
+  });
+
+  it("falls back to the unspoken copy when a gateway sends no spoken one", () => {
+    // The de-duplication must not become a way to lose the only copy there is.
+    const p = new Probe();
+    p.cb.onBotStartedSpeaking();
+    p.cb.onBotOutput("Only the LLM stream here.", false);
+    p.cb.onBotStoppedSpeaking();
+    expect(p.of("agent-transcript")).toEqual(["Only the LLM stream here."]);
   });
 
   it("surfaces words as they are spoken", () => {

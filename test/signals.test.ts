@@ -121,7 +121,28 @@ describe("the live signal stream", () => {
     // caller two incompatible shapes under one event is how they end up with
     // `undefined.seq` in production.
     expect(parseSignal({ kind: "signal", signal: "shadow", drafted: true })).toBeNull();
-    expect(parseSignal({ kind: "signal", v: 2, type: "barge_in" })).toBeNull();
+    expect(parseSignal({ kind: "signal", v: "1", type: "barge_in" })).toBeNull();
+    expect(parseSignal({ kind: "signal", v: 0, type: "barge_in" })).toBeNull();
+  });
+
+  it("accepts a FUTURE version rather than going silent on a schema bump", () => {
+    // The stream is documented additive-only, so a v2 is v1 plus fields this build has
+    // never heard of. Failing closed on the number would mute `signal` on every embed
+    // already published, the moment the gateway bumped it — an outage bought with
+    // nothing, since a genuinely incompatible schema would have to change `kind`.
+    const s = parseSignal({
+      kind: "signal",
+      v: 2,
+      type: "barge_in",
+      seq: 7,
+      t_ms: 1200,
+      something_new: { we: "have never seen" },
+    });
+    expect(s).toMatchObject({ type: "barge_in", seq: 7, tMs: 1200, version: 2 });
+    // …and everything unrecognised is still reachable, untouched.
+    expect((s!.raw as Record<string, unknown>).something_new).toEqual({
+      we: "have never seen",
+    });
   });
 
   it("ignores everything else", () => {

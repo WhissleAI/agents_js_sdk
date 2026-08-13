@@ -33,7 +33,7 @@
   },
   "sideEffects": false,
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && node scripts/normalize-sourcemaps.mjs",
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit --skipLibCheck false",
     "prepack": "npm run build",

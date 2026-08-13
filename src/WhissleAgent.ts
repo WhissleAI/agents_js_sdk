@@ -10,11 +10,7 @@ import {
 import { EarconPlayer, type EarconOptions } from "./earcons";
 import { LiveKitSession, type LiveKitConnectInfo, type SessionCallbacks } from "./livekit";
 import { checkMicrophone, listMicrophones, type MicProblem } from "./mic";
-import {
-  attachBoostedPlayout,
-  primeBoostedPlayout,
-  teardownBoostedPlayout,
-} from "./mobile-audio";
+import { BoostedPlayout } from "./mobile-audio";
 import { parseSignal, parseUserMetadata } from "./signals";
 import { TextChannel, WhissleTextError, type SendTextOptions, type TextTurn } from "./text";
 import {
@@ -48,7 +44,22 @@ export type WhissleTransport = "auto" | "webrtc" | "livekit";
 export interface WhissleSessionInfo {
   token: string;
   expires_in?: number;
-  agent?: { name?: string; greeting?: string };
+  agent?: {
+    name?: string;
+    greeting?: string;
+    /**
+     * Where this agent's tool cues are played: `"ui"` (the client does it — the
+     * default, and what every embed gets unless someone changed it), `"call"` (the
+     * pipeline mixes them into the outgoing audio itself) or `"off"`.
+     *
+     * Read so that a `"call"` agent doesn't get the cue twice. The gateway does not
+     * send this field yet; when absent the SDK plays, which is correct for `"ui"` and
+     * harmless for `"off"` because that mode ships no clip name to play.
+     */
+    tool_sounds?: string;
+  };
+  /** As `agent.tool_sounds`, accepted at the top level too. */
+  tool_sounds?: string;
   text_enabled?: boolean;
   session_id?: string;
   ice_servers?: RTCIceServer[];
@@ -411,9 +422,18 @@ export class WhissleAgent {
   private _turnSpoken = "";
   private _turnUnspoken = "";
   private _turnLegacy = "";
+  /** The last `agent-partial` emitted this turn, so the next one cannot be shorter. */
+  private _turnPartial = "";
   private earcons: EarconPlayer;
   private thinking = new ThinkingTracker();
   private textChannel: TextChannel | null = null;
+  /** A thread key handed to `resumeTextThread` before a channel existed to hold it. */
+  private pendingThread: string | null = null;
+  /** When `_session` was minted, for the TTL check in `sessionExpired`. */
+  private _sessionMintedAt = 0;
+  /** Per-instance mobile playout. NOT module state: two agents on one page each
+   *  own their graph, so one stopping cannot mute the other. */
+  private playout = new BoostedPlayout();
 
   constructor(options: WhissleAgentOptions) {
     if (!options?.apiKey && !options?.sessionToken && !options?.getToken) {
@@ -561,6 +581,21 @@ export class WhissleAgent {
     return (await res.json()) as WhissleSessionInfo;
   }
 
+  /**
+   * Is the pipeline already mixing tool cues into the audio we are about to play?
+   *
+   * `services/tool_cue.py` mixes them server-side in mode `"call"`, while
+   * `services/tool_events.py` keeps shipping the clip NAME in every mode but `"off"`.
+   * So on a `"call"` agent an SDK that plays unconditionally produces two cues a few
+   * hundred milliseconds apart. Only an explicitly-configured agent is affected — the
+   * embed default is `"ui"` — but "explicitly configured" is exactly the org that
+   * cared about the sound.
+   */
+  private serverMixesCues(session: WhissleSessionInfo): boolean {
+    const mode = session.agent?.tool_sounds ?? session.tool_sounds;
+    return typeof mode === "string" && mode.trim().toLowerCase() === "call";
+  }
+
   /** The ICE servers for this session: the caller's, else the mint's, else ours. */
   private iceFor(session: WhissleSessionInfo): RTCIceServer[] {
     if (this.iceFromCaller) return this.opts.iceServers;
@@ -620,7 +655,7 @@ export class WhissleAgent {
     // from the integrator's click handler, and starting the context here means it
     // is running long before the agent's first words rather than racing them.
     // No-op on desktop. See `./mobile-audio`.
-    primeBoostedPlayout();
+    this.playout.prime();
     // Same gesture, same reason: an AudioContext created anywhere but inside the click
     // stays suspended, and a suspended context makes every tool cue a silent no-op
     // with nothing in the console to explain it.
@@ -633,7 +668,15 @@ export class WhissleAgent {
       // can't reach a microphone" for something that is not a browser.
       if (this.opts.micPreflight !== false && typeof window !== "undefined") {
         const problem = await checkMicrophone();
-        if (problem) {
+        // Only a BLOCKING problem ends the session. This check is on by default and
+        // runs on other people's sites, so anything it is not certain about has to be
+        // reported rather than enforced — refusing a working microphone is a worse
+        // failure than the deaf session the preflight exists to prevent, because the
+        // visitor cannot even get as far as finding out. A warning goes out as an
+        // ordinary `error` event (the widget shows it) and `start()` carries on.
+        if (problem?.severity === "warning") {
+          this.fail(problem.message, "microphone");
+        } else if (problem) {
           const err = new Error(problem.message) as Error & {
             code: WhissleErrorDetail["code"];
           };
@@ -643,6 +686,14 @@ export class WhissleAgent {
       }
       const session = await this.mintSession();
       this._session = session;
+      this._sessionMintedAt = Date.now();
+      // An agent whose tool cues are mixed into the CALL audio server-side
+      // (`tool_sounds: "call"`) must not also have them played here — the two land a
+      // few hundred ms apart and read as a stutter, not a cue. The pipeline still
+      // ships the clip name in that mode (only `"off"` suppresses it), so the mint is
+      // the only place the mode is knowable. Absent = "ui" = the browser plays it,
+      // which is the embed default and every agent that has never been configured.
+      this.earcons.setSuppressed(this.serverMixesCues(session));
       const token = session.token;
 
       // The avatar comes up BEFORE the conversation, so the face is already
@@ -672,6 +723,7 @@ export class WhissleAgent {
     } catch (err) {
       this._state = "idle";
       void this.teardown();
+      this.releaseSession();
       const coded = err as { code?: WhissleErrorDetail["code"]; status?: number };
       this.fail(
         err instanceof Error ? err.message : String(err),
@@ -774,6 +826,7 @@ export class WhissleAgent {
         // clearing it here would throw the only copy some gateways send away.
         this._turnSpoken = "";
         this._turnUnspoken = "";
+        this._turnPartial = "";
         // The bot talking is the ground truth that the wait is over — it beats any
         // bookkeeping, because a result frame can be dropped on the way here and
         // audio cannot be faked. Without this, one lost result pins a "working…"
@@ -791,6 +844,7 @@ export class WhissleAgent {
         this._turnSpoken = "";
         this._turnUnspoken = "";
         this._turnLegacy = "";
+        this._turnPartial = "";
         if (text) this.emit("agent-transcript", text);
         this.emit("speaking-stopped");
       },
@@ -799,11 +853,28 @@ export class WhissleAgent {
         if (!seg) return;
         if (spoken) this._turnSpoken = this._turnSpoken ? `${this._turnSpoken} ${seg}` : seg;
         else this._turnUnspoken = this._turnUnspoken ? `${this._turnUnspoken} ${seg}` : seg;
-        // The turn so far, live. Same de-duplication as the final flush — prefer the
-        // spoken copy, fall back to the unspoken one — so the partial and the final
-        // are the same text growing, never two different readings of one reply.
-        const so_far = this._turnSpoken || this._turnUnspoken;
-        if (so_far) this.emit("agent-partial", so_far);
+        // The turn so far, live. Prefer the spoken copy — as the final flush does —
+        // but a partial must never go BACKWARDS.
+        //
+        // Observed on the live demo agent: the LLM stream delivers the whole greeting
+        // as ONE segment, and the TTS stream then delivers the same greeting a WORD at
+        // a time. Preferring `spoken` unconditionally therefore rendered the complete
+        // sentence and then replaced it with "Hey,", growing back to the same sentence
+        // over the next two seconds. Anyone rendering `agent-partial` — which the
+        // README recommends as the thing to show mid-answer — watched the reply
+        // apparently delete itself.
+        //
+        // So: take whichever reading is furthest along, and emit only when the turn
+        // has actually advanced. The spoken copy still wins as soon as it catches up,
+        // which is the normal case (it usually arrives first and is the only one).
+        const ahead =
+          this._turnSpoken.length >= this._turnUnspoken.length
+            ? this._turnSpoken
+            : this._turnUnspoken;
+        if (ahead.length > this._turnPartial.length) {
+          this._turnPartial = ahead;
+          this.emit("agent-partial", ahead);
+        }
       },
       onBotLegacyOutput: (segment) => {
         const seg = segment.trim();
@@ -832,7 +903,7 @@ export class WhissleAgent {
           // element playing exactly as before. Never reached with an avatar: Simli
           // owns playback there, and its PCM comes off the data channel, not this
           // track.
-          attachBoostedPlayout(stream, this.audioEl);
+          this.playout.attach(stream, this.audioEl);
           this.audioEl.play().catch(() => {
             this.fail(
               "Your browser blocked the agent's audio. Click anywhere on the page to allow it.",
@@ -1239,15 +1310,29 @@ export class WhissleAgent {
     }
   }
 
-  /** The thread `sendText` is on over HTTP, once one exists. Store it to resume the
-   *  same conversation on a later page load. */
+  /**
+   * The key that resumes the HTTP text thread `sendText` is on.
+   *
+   * Persist this (a cookie, `localStorage`) and pass it to `resumeTextThread` on the
+   * visitor's next page load. It is NOT the `conversationId` on a `TextTurn`: that is
+   * the gateway's conversation row id, which nothing on the wire accepts as an input.
+   * See `./text` for why the distinction is load-bearing.
+   */
   get textThread(): string | null {
-    return this.textChannel?.thread ?? null;
+    return this.textChannel?.thread ?? this.pendingThread ?? null;
   }
 
-  /** Continue an HTTP text thread from a previous page load. */
-  resumeTextThread(conversationId: string): void {
-    void this.ensureTextChannel().then((c) => c.resume(conversationId));
+  /**
+   * Continue an HTTP text thread from a previous page load.
+   *
+   * Deliberately does no I/O: it remembers the key and applies it when the channel is
+   * built. Minting here would spend a session token — against the mint's rate limit —
+   * on a page load where the visitor may never type anything.
+   */
+  resumeTextThread(threadId: string): void {
+    if (!threadId) return;
+    this.pendingThread = threadId;
+    this.textChannel?.resume(threadId);
   }
 
   /**
@@ -1259,9 +1344,19 @@ export class WhissleAgent {
    * enough not to describe it yet.
    */
   private async ensureTextChannel(): Promise<TextChannel> {
-    if (this.textChannel) return this.textChannel;
+    if (this.textChannel && !this.sessionExpired()) return this.textChannel;
+    // Expired: drop the door and mint a new one. A widget can sit on a page for hours
+    // — an embed token lives 900 s — so the alternative is a `sendText` that answers
+    // "this session has expired" with no way back, on a page that never reloaded.
+    // The thread key survives the re-mint, so the conversation does not restart.
+    if (this.textChannel) {
+      this.pendingThread = this.textChannel.thread ?? this.pendingThread;
+      this.textChannel = null;
+      this._session = null;
+    }
     const session = this._session ?? (await this.mintSession());
     this._session = session;
+    this._sessionMintedAt = Date.now();
     if (session.text_enabled === false) {
       throw new WhissleTextError(
         404,
@@ -1272,8 +1367,29 @@ export class WhissleAgent {
       ?.text?.connect?.url;
     const path = described || "/api/embed/chat/turn";
     const url = /^https?:/i.test(path) ? path : `${this.opts.baseUrl}${path}`;
-    this.textChannel = new TextChannel(url, session.token, session.session_id);
-    return this.textChannel;
+    const channel = new TextChannel(url, session.token, session.session_id);
+    // A key the caller asked to resume outranks the one this mint happens to carry:
+    // the whole point of resuming is that the new page load has a NEW session id.
+    if (this.pendingThread) channel.resume(this.pendingThread);
+    this.textChannel = channel;
+    return channel;
+  }
+
+  /**
+   * Has the session token we hold outlived its TTL?
+   *
+   * Judged with a 30 s margin, because the failure is asymmetric: re-minting a token
+   * that had a few seconds left costs one request, while using one that has just
+   * expired costs the visitor their message and gives them nothing to do about it.
+   * A caller-supplied static `sessionToken` is never treated as expired — we cannot
+   * mint a replacement for it, so declaring it dead would only turn a maybe-working
+   * request into a definitely-failing one.
+   */
+  private sessionExpired(): boolean {
+    if (this.opts.sessionToken) return false;
+    const ttl = this._session?.expires_in;
+    if (!ttl || !this._sessionMintedAt) return false;
+    return Date.now() - this._sessionMintedAt > Math.max(0, ttl * 1000 - 30_000);
   }
 
   /** Silence tool cues without changing anything else. Wire this to your mute button:
@@ -1323,10 +1439,46 @@ export class WhissleAgent {
     return checkMicrophone();
   }
 
-  /** End the session and clean up. */
+  /** End the session and clean up. Handlers are kept, so the same instance can be
+   *  started again; use `destroy()` to let go of it for good. */
   stop(): void {
     void this.teardown();
+    this.releaseSession();
     this._state = "idle";
+  }
+
+  /**
+   * Release everything and forget the handlers. The instance is not reusable after.
+   *
+   * `stop()` deliberately keeps event handlers so a widget can offer "start again"
+   * without re-wiring; that also means a long-lived page accumulates them. Call this
+   * when the component unmounts — an SPA route change, a React `useEffect` cleanup —
+   * so the agent, its handlers and anything they close over can be collected.
+   */
+  destroy(): void {
+    this.stop();
+    this.handlers.clear();
+  }
+
+  /**
+   * Drop the minted session and the text door built on it.
+   *
+   * Separate from `teardown()` on purpose. `teardown()` also runs MID-`start()`, when
+   * a transport fails and the same session is about to be reused for the fallback —
+   * clearing `_session` there would throw away the mint the retry is standing on. This
+   * runs only where the session is genuinely finished.
+   *
+   * Not clearing it is how a widget that has been open for hours reaches a `sendText`
+   * that answers "this session has expired" with nothing to do about it: the token
+   * lives 900 s, the page does not reload, and the cached channel holds the dead token
+   * forever. The THREAD survives (it is a key, not a credential), so the conversation
+   * resumes on the next mint rather than starting cold.
+   */
+  private releaseSession(): void {
+    this.pendingThread = this.textChannel?.thread ?? this.pendingThread;
+    this.textChannel = null;
+    this._session = null;
+    this._sessionMintedAt = 0;
   }
 
   private async teardown(): Promise<void> {
@@ -1346,7 +1498,7 @@ export class WhissleAgent {
     const avatar = this.avatar;
     this.avatar = null;
     await avatar?.destroy();
-    teardownBoostedPlayout();
+    this.playout.teardown();
     this.earcons.release();
     this.settleThinking(this.thinking.clear());
     if (this.audioEl) {

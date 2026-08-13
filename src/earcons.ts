@@ -7,23 +7,31 @@
 // along (`services/tool_events.py` puts a `sound` on the `phase:"started"` event) and
 // this SDK was throwing it away.
 //
-// WHY SYNTHESISED, NOT THE MP3 BANK
+// THE REAL BANK, WITH SYNTHESIS AS THE FALLBACK
 //
-// The dashboard plays 56 mastered clips out of its own `public/sounds/tool/`. An embed
-// cannot: `/sounds/tool/search_0.mp3` on a customer's origin is a 404, and the gateway
-// does not serve the bank (verified — every candidate path 404s). The three ways out
-// are (a) bundle ~230 KB of audio as base64 into a widget SDK, (b) fetch it from a CDN
-// on first tool call, or (c) synthesise it. (a) triples the bundle for a feature many
-// pages never hit; (b) means the cue arrives AFTER a network round-trip, which is an
-// echo, not a cue — the exact failure `tool-sounds.ts` was written to avoid. So (c):
-// a handful of oscillators, zero bytes, zero requests, and the first cue is as fast as
-// the thousandth.
+// whissle.ai serves its own mastered bank publicly and with open CORS:
 //
-// The trade is honest and worth naming: these are not byte-identical to the dashboard's
-// clips. They are the same LANGUAGE — same categories, same meanings, same
-// name→category→variant mapping, so the same tool always makes the same sound and
-// different kinds of work sound different. If you want the exact bank, host it and pass
-// `earcons: { bankUrl: "/sounds/tool" }`; this module will fetch and prefer it.
+//     GET https://www.whissle.ai/sounds/tool/search_0.mp3
+//     → 200  audio/mpeg  2,684 B  access-control-allow-origin: *
+//
+// so an embed on a customer's origin can have the EXACT clips the dashboard plays.
+// That is the default (`DEFAULT_BANK_URL`), because a third-party embed should sound
+// like whissle.ai rather than like an approximation of it. The whole bank is 52 clips
+// and ~85 KB; a session touches a handful. (Note the apex `whissle.ai` 307s to `www.`
+// — probing it without following redirects is what makes the bank look absent.)
+//
+// Synthesis is still here, and still load-bearing, for the three cases a fetch cannot
+// cover: the FIRST call of a clip that isn't warm yet, an offline/blocked network, and
+// a page whose CSP forbids `connect-src` to whissle.ai. `play()` never WAITS on the
+// network — it synthesises immediately and lets the download warm the cache for next
+// time — so the cue is always as prompt as it was, and a hole in the bank is never a
+// hole in the conversation.
+//
+// The synthesised cues are not byte-identical to the mastered ones. They are the same
+// LANGUAGE — same categories, same meanings, same name→category→variant mapping, so
+// the same tool always makes the same sound and different kinds of work sound
+// different. Pass `bankUrl: "/sounds/tool"` to serve a copy from your own origin, or
+// `bankUrl: null` to never touch the network and use the oscillators alone.
 //
 // The backend sends a NAME (`"search_3"`), never audio and never a URL. That name is
 // `<category>_<variant>` and it is resolved server-side by a total function over every
@@ -33,6 +41,37 @@
 /** `<category>_<variant>`, the only shape the backend emits. Anything else came from
  *  somewhere we should not be turning into sound. */
 const CLIP_NAME = /^([a-z]+)_(\d+)$/;
+
+/** Where the mastered clips live. Public, `access-control-allow-origin: *`, and the
+ *  same files whissle.ai itself plays — see the note at the top of this file. */
+const DEFAULT_BANK_URL = "https://www.whissle.ai/sounds/tool";
+
+/**
+ * The clips worth having in memory before the first tool call.
+ *
+ * NOT the whole bank — 52 requests on `start()` to cover cues most sessions never fire
+ * would be rude on someone else's page. Variant **0** of each category is *reserved*
+ * server-side (`services/tool_sounds.py::_RESERVED_VARIANT`) for the handful of tools
+ * pinned by hand — `search_knowledge_base`, `book_appointment`, `send_email`,
+ * `send_sms`, `transfer_call`, `collect_digits`, `find_image`, `update_agent` — i.e.
+ * exactly the ones that fire on nearly every call, and no custom tool can ever hash
+ * onto them. `error_0` is on the list twice over: it is `ERROR_SOUND`, the cue for
+ * EVERY failure whatever the tool was, and the one cue that most has to land.
+ *
+ * Nine requests, ~18 KB. Everything outside it synthesises on first hit and plays the
+ * real clip from the second onwards.
+ */
+const PRELOAD: readonly string[] = [
+  "search_0",
+  "create_0",
+  "update_0",
+  "send_0",
+  "handoff_0",
+  "media_0",
+  "capture_0",
+  "generic_0",
+  "error_0",
+];
 
 /**
  * Peak amplitude of a cue, linear. The mp3 bank is mastered to a -20 dBFS ceiling so it
@@ -148,13 +187,17 @@ export interface EarconOptions {
   /** Trim, 0..2, applied on top of the built-in -20 dBFS ceiling. Default `1`. */
   volume?: number;
   /**
-   * Serve the real mastered clips from here instead of synthesising, e.g.
-   * `"/sounds/tool"` if you have copied the bank into your own `public/`. Clips are
-   * fetched as `<bankUrl>/<name>.mp3` and decoded once. A clip that fails to load
-   * falls back to the synthesised cue rather than to silence, so a partial bank or a
-   * version skew is never audible as a hole.
+   * Where to fetch the mastered clips from. Defaults to whissle.ai's own public bank,
+   * so an embed sounds like the dashboard with no setup.
+   *
+   * Clips are fetched as `<bankUrl>/<name>.mp3` and decoded once. A clip that fails to
+   * load falls back to the synthesised cue rather than to silence, so a partial bank,
+   * a blocked network or a version skew is never audible as a hole.
+   *
+   *   bankUrl: "/sounds/tool"   // your own copy, served from your origin
+   *   bankUrl: null             // never touch the network — oscillators only
    */
-  bankUrl?: string;
+  bankUrl?: string | null;
 }
 
 /**
@@ -170,6 +213,7 @@ export class EarconPlayer {
   private buffers = new Map<string, AudioBuffer | null>();
   private inflight = new Map<string, Promise<AudioBuffer | null>>();
   private muted = false;
+  private suppressed = false;
   private readonly enabled: boolean;
   private readonly volume: number;
   private readonly bankUrl: string | null;
@@ -177,14 +221,28 @@ export class EarconPlayer {
   constructor(opts: EarconOptions = {}) {
     this.enabled = opts.enabled !== false;
     this.volume = typeof opts.volume === "number" ? Math.max(0, Math.min(2, opts.volume)) : 1;
-    this.bankUrl = opts.bankUrl ? opts.bankUrl.replace(/\/+$/, "") : null;
+    // `undefined` means "you didn't choose" → the real bank. `null` (or "") is an
+    // explicit opt-out for a page that must make no third-party requests.
+    this.bankUrl =
+      opts.bankUrl === null
+        ? null
+        : (opts.bankUrl || DEFAULT_BANK_URL).replace(/\/+$/, "") || null;
   }
 
-  /** Start the audio context. Call from the user gesture that starts the session. */
+  /**
+   * Start the audio context and warm the bank. Call from the user gesture that starts
+   * the session.
+   *
+   * The fetch belongs HERE rather than at the first tool call: `start()` runs inside
+   * the click, and a call's first tool typically fires seconds later, so the clips are
+   * decoded and waiting long before anything needs them. `play()` never blocks on this
+   * either way.
+   */
   prime(): void {
     if (!this.enabled) return;
     const ctx = this.context();
     if (ctx && ctx.state === "suspended") void ctx.resume().catch(() => {});
+    this.preload(PRELOAD);
   }
 
   /** Silence cues without tearing anything down (a user's mute toggle). */
@@ -193,12 +251,24 @@ export class EarconPlayer {
   }
 
   /**
+   * Silence cues because SOMETHING ELSE is already playing them — today, an agent
+   * whose cues the pipeline mixes into the call audio itself.
+   *
+   * Kept apart from `setMuted` because they answer to different owners: mute is the
+   * visitor's, suppression is the session's, and a visitor un-muting must not
+   * resurrect a cue that would arrive on top of one they can already hear.
+   */
+  setSuppressed(suppressed: boolean): void {
+    this.suppressed = suppressed;
+  }
+
+  /**
    * Play the clip the backend named. Safe with anything — an unknown name, a category
    * this build has never heard of, `undefined`. A cue is a nicety; nothing here may
    * throw into a live conversation.
    */
   play(name: string | null | undefined): void {
-    if (!this.enabled || this.muted || !name) return;
+    if (!this.enabled || this.muted || this.suppressed || !name) return;
     const parsed = CLIP_NAME.exec(name);
     if (!parsed) return;
     const ctx = this.context();
@@ -216,10 +286,20 @@ export class EarconPlayer {
     this.synthesise(parsed[1] as EarconCategory, Number(parsed[2]));
   }
 
-  /** Warm the context and, with a bank configured, the clips a call fires most. */
+  /**
+   * Warm the clips a call fires most, so they are decoded before the first tool runs.
+   *
+   * Guarded by the SAME `CLIP_NAME` check `play()` applies, and for the same reason:
+   * a clip name is the only part of this module's input that gets interpolated into a
+   * URL, and the guard is what stops a server-supplied string from choosing that URL.
+   * `play()` had it and this did not — dead code while the default was "no bank", live
+   * the moment one exists.
+   */
   preload(names: readonly string[]): void {
     if (!this.enabled || !this.bankUrl) return;
-    for (const n of names) void this.loadClip(n);
+    for (const n of names) {
+      if (CLIP_NAME.test(n)) void this.loadClip(n);
+    }
   }
 
   /** Release the context at the end of the session. */
@@ -348,4 +428,11 @@ export class EarconPlayer {
 }
 
 /** Exported for tests and for anyone who wants the mapping without a browser. */
-export const EARCON_INTERNALS = { CLIP_NAME, VOICES, VARIANT_SEMITONES, PEAK };
+export const EARCON_INTERNALS = {
+  CLIP_NAME,
+  VOICES,
+  VARIANT_SEMITONES,
+  PEAK,
+  DEFAULT_BANK_URL,
+  PRELOAD,
+};

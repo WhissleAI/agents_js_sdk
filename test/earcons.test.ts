@@ -47,8 +47,19 @@ class FakeContext {
       onended: null,
     } as unknown as OscillatorNode;
   }
+  buffersPlayed = 0;
   createBufferSource() {
-    return { buffer: null, connect: () => {}, start: () => {} } as unknown as AudioBufferSourceNode;
+    const self = this;
+    return {
+      buffer: null,
+      connect: () => {},
+      start: () => {
+        self.buffersPlayed++;
+      },
+    } as unknown as AudioBufferSourceNode;
+  }
+  decodeAudioData(bytes: ArrayBuffer) {
+    return Promise.resolve({ duration: 0.3, bytes } as unknown as AudioBuffer);
   }
   resume() {
     return Promise.resolve();
@@ -158,7 +169,137 @@ describe("the cue is a signal, not noise", () => {
   });
 });
 
+/** Drain microtasks: a fetch + arrayBuffer + decode is several ticks deep. */
+const flush = () => new Promise((r) => setTimeout(r, 0));
+
+describe("the real bank", () => {
+  /** Record every URL fetched and answer with something decodable. */
+  function withBank(status = 200) {
+    const urls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        urls.push(String(input));
+        return new Response(status === 200 ? new ArrayBuffer(8) : null, { status });
+      }),
+    );
+    return urls;
+  }
+
+  it("defaults to whissle.ai's own bank, so an embed sounds like the dashboard", () => {
+    // The premise this replaced was that no bank was reachable and synthesis was the
+    // only option. It is served publicly with `access-control-allow-origin: *` —
+    // verified against production — so a third-party embed can have the exact clips.
+    expect(EARCON_INTERNALS.DEFAULT_BANK_URL).toBe("https://www.whissle.ai/sounds/tool");
+  });
+
+  it("warms the reserved clips on prime, inside the user gesture", async () => {
+    const urls = withBank();
+    withAudio();
+    new EarconPlayer().prime();
+    await Promise.resolve();
+    // Variant 0 of each category is reserved server-side for the hand-pinned tools —
+    // search_knowledge_base, book_appointment, send_email … — i.e. the ones that fire
+    // on nearly every call, plus error_0, the cue for every failure.
+    expect(urls).toEqual(
+      EARCON_INTERNALS.PRELOAD.map((n) => `https://www.whissle.ai/sounds/tool/${n}.mp3`),
+    );
+  });
+
+  it("warms nine clips, not the whole bank", () => {
+    // 52 requests on start(), for cues most sessions never fire, on somebody else's
+    // page. The rest arrive on first use and are cached from the second.
+    expect(EARCON_INTERNALS.PRELOAD).toHaveLength(9);
+  });
+
+  it("guards preload with the same clip-name check as play", async () => {
+    // A name is the one part of this module's input that reaches a URL, and the guard
+    // is the only thing stopping a server-supplied string from choosing that URL.
+    // `play()` had the check and `preload()` did not — dead code while there was no
+    // default bank, live the moment there is one.
+    const urls = withBank();
+    withAudio();
+    const p = new EarconPlayer();
+    p.preload(["../../etc/passwd", "search_1.mp3", "http://evil/x_1", "SEARCH_1", "search_3"]);
+    await Promise.resolve();
+    expect(urls).toEqual(["https://www.whissle.ai/sounds/tool/search_3.mp3"]);
+  });
+
+  it("plays the synthesised cue immediately and the real clip from then on", async () => {
+    const urls = withBank();
+    const c = withAudio();
+    const p = new EarconPlayer();
+    p.prime();
+    p.play("handoff_4");
+    // No waiting on the network: a cue that arrives after a round-trip is an echo.
+    expect(c.oscillators.length).toBeGreaterThan(0);
+    expect(urls).toContain("https://www.whissle.ai/sounds/tool/handoff_4.mp3");
+
+    await flush(); // let the fetch + decode land
+    const synthesised = c.oscillators.length;
+    p.play("handoff_4");
+    expect(c.buffersPlayed).toBe(1); // the mastered clip
+    expect(c.oscillators.length).toBe(synthesised); // and no oscillator this time
+  });
+
+  it("falls back to the oscillators when the bank 404s, and stops re-asking", async () => {
+    const urls = withBank(404);
+    const c = withAudio();
+    const p = new EarconPlayer();
+    p.prime();
+    urls.length = 0;
+    p.play("media_2");
+    await flush();
+    expect(urls).toHaveLength(1);
+    const first = c.oscillators.length;
+    expect(first).toBeGreaterThan(0);
+    p.play("media_2");
+    await Promise.resolve();
+    // Still audible — a hole in the bank must never become a hole in the conversation
+    // — and the miss is remembered rather than re-fetched on every cue.
+    expect(c.oscillators.length).toBeGreaterThan(first);
+    expect(urls).toHaveLength(1);
+  });
+
+  it("touches the network not at all with bankUrl: null", async () => {
+    const urls = withBank();
+    const c = withAudio();
+    const p = new EarconPlayer({ bankUrl: null });
+    p.prime();
+    p.play("search_0");
+    await Promise.resolve();
+    expect(urls).toEqual([]);
+    expect(c.oscillators.length).toBeGreaterThan(0);
+  });
+
+  it("takes a bank of your own", async () => {
+    const urls = withBank();
+    withAudio();
+    new EarconPlayer({ bankUrl: "/sounds/tool/" }).prime();
+    await Promise.resolve();
+    expect(urls[0]).toBe("/sounds/tool/search_0.mp3");
+  });
+});
+
 describe("switches", () => {
+  it("stays silent when the server is already mixing the cue into the call audio", () => {
+    // An agent on `tool_sounds: "call"` has the cue mixed into its outgoing audio by
+    // services/tool_cue.py, while services/tool_events.py still ships the clip NAME
+    // (only "off" suppresses that). Playing it here too gives two cues a few hundred
+    // milliseconds apart, which reads as a stutter rather than a signal.
+    const c = withAudio();
+    const p = new EarconPlayer();
+    p.prime();
+    p.setSuppressed(true);
+    p.play("search_0");
+    expect(c.oscillators).toHaveLength(0);
+    // And un-muting must not resurrect it: mute is the visitor's, suppression is the
+    // session's, and they are not the same switch.
+    p.setMuted(false);
+    p.play("search_0");
+    expect(c.oscillators).toHaveLength(0);
+  });
+
   it("makes no sound at all when disabled", () => {
     const c = withAudio();
     const p = new EarconPlayer({ enabled: false });

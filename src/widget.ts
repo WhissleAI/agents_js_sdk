@@ -9,10 +9,22 @@ export interface WidgetOptions extends WhissleAgentOptions {
   /**
    * Show a message box, so a visitor can type instead of talking.
    *
-   * Default: on when the agent's session says `text_enabled`. Typing works with no
-   * call up at all (a visitor who denies the mic still gets the agent), and during a
-   * call it goes into the same conversation — spell an email rather than repeating it
-   * four times. Set `false` to force voice only.
+   * Typing works with no call up at all (a visitor who denies the mic still gets the
+   * agent), and during a call it goes into the same conversation — spell an email
+   * rather than repeating it four times.
+   *
+   *   `false`      voice only, always. The box is never rendered.
+   *   `true`       always shown, whatever the agent says.
+   *   *unset*      shown, and REMOVED as soon as the agent turns out not to support
+   *                text — either the session mint says `text_enabled: false`, or a
+   *                send comes back 404.
+   *
+   * The default is optimistic on purpose. `mount()` has no session yet — learning
+   * whether text is enabled costs a mint, and minting on page load would spend a
+   * metered token against the rate limit for a conversation most visitors never
+   * start. Hiding the box until a call succeeds would also be backwards: the visitor
+   * this exists for is the one who just refused the microphone. So it is offered, and
+   * withdrawn at the first authoritative answer rather than left to 404 on every send.
    */
   text?: boolean;
 }
@@ -171,6 +183,32 @@ export function mount(target: string | HTMLElement, options: WidgetOptions): Whi
   // until they succeed at the thing they refused to do would be exactly backwards.
   if (options.text !== false) {
     sayRow.style.display = "flex";
+
+    /**
+     * Take the box away once we KNOW this agent has no text channel.
+     *
+     * Only when the caller left the choice to us (`text` unset): someone who wrote
+     * `text: true` asked for the box and gets to keep it, even against an agent that
+     * will refuse — that is a configuration mistake they should be able to see.
+     */
+    const withdraw = (why: string) => {
+      if (options.text === true) return;
+      sayRow.remove();
+      err.style.display = "none";
+      hint?.remove();
+      const note = document.createElement("div");
+      note.className = "wa-hint";
+      note.textContent = why;
+      log.appendChild(note);
+    };
+    // The mint is the authoritative answer and `start()` is when we get one.
+    const checkSession = () => {
+      if (agent.session && agent.session.text_enabled === false) {
+        withdraw("This assistant is voice only.");
+      }
+    };
+    agent.on("connected", checkSession).on("bot-ready", checkSession);
+
     const send = async () => {
       const text = say.value.trim();
       if (!text) return;
@@ -179,10 +217,16 @@ export function mount(target: string | HTMLElement, options: WidgetOptions): Whi
       sendBtn.disabled = true;
       try {
         await agent.sendText(text);
-      } catch {
+      } catch (e) {
         // `sendText` already emitted a described `error`; the bar above is showing it.
         // Give the message back rather than swallowing what they typed.
         say.value = text;
+        // …unless the answer was "this agent has no text channel", which is not a
+        // transient failure and will be the answer to every future message too.
+        if ((e as { code?: number })?.code === 404) {
+          say.value = "";
+          withdraw("This assistant is voice only — tap Start to talk to it.");
+        }
       } finally {
         sendBtn.disabled = false;
         say.focus();
@@ -192,6 +236,7 @@ export function mount(target: string | HTMLElement, options: WidgetOptions): Whi
     say.addEventListener("keydown", (e) => {
       if (e.key === "Enter") void send();
     });
+    checkSession();
   }
 
   return agent;
