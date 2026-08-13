@@ -183,6 +183,26 @@ supervisor's dashboard.
 
 ---
 
+## When the interviewer goes quiet
+
+An agent that stops talking to look something up is the most alarming thing in a
+mock interview: the candidate assumes they broke it, and starts talking over the
+answer. Two things say otherwise, and both come free.
+
+```js
+agent.on("thinking", (s) => {
+  thinkingStrip.hidden = !s.active;
+  thinkingStrip.textContent = s.label ?? "Checking something…";
+});
+```
+
+`thinking` is already one edge each way however many tools the turn fired, so
+there is nothing to debounce. The audible half — a short cue per tool, chosen by
+the platform — the SDK plays for you; `agent.setEarconsMuted(true)` if you'd
+rather it didn't.
+
+---
+
 ## Making it yours
 
 1. **Replace `agents.json`.** An app for accountants, or for triage nurses, is

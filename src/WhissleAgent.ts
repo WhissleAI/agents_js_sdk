@@ -7,12 +7,24 @@ import {
   type AvatarAudioStats,
   type AvatarOptions,
 } from "./avatar";
+import { EarconPlayer, type EarconOptions } from "./earcons";
 import { LiveKitSession, type LiveKitConnectInfo, type SessionCallbacks } from "./livekit";
+import { checkMicrophone, listMicrophones, type MicProblem } from "./mic";
 import {
   attachBoostedPlayout,
   primeBoostedPlayout,
   teardownBoostedPlayout,
 } from "./mobile-audio";
+import { parseSignal, parseUserMetadata } from "./signals";
+import { TextChannel, WhissleTextError, type SendTextOptions, type TextTurn } from "./text";
+import {
+  parseToolEvent,
+  ThinkingTracker,
+  type ThinkingState,
+  type ToolFinished,
+  type ToolProgress,
+  type ToolStarted,
+} from "./tool-events";
 
 const DEFAULT_BASE_URL = "https://aws-gateway-backend.whissle.ai/bot";
 const DEFAULT_ICE = [
@@ -107,6 +119,25 @@ export interface WhissleAgentOptions {
    * you asked for a specific transport.
    */
   transport?: WhissleTransport;
+  /**
+   * Tool earcons — the short cue that plays when the agent goes off to do something.
+   *
+   * On by default, and worth leaving on. When an agent calls a tool it stops talking
+   * for as long as the tool takes; without a cue that is dead air the visitor reads as
+   * a hang. The platform picks the cue per tool and sends its name; this SDK plays it.
+   * See `./earcons` for what "plays it" means and why it isn't the mp3 bank.
+   *
+   *   earcons: false                          // silent tool calls
+   *   earcons: { volume: 0.6 }                // quieter
+   *   earcons: { bankUrl: "/sounds/tool" }    // the real clips, hosted by you
+   */
+  earcons?: boolean | EarconOptions;
+  /**
+   * Ask for the microphone and check it BEFORE connecting, so a blocked or busy mic
+   * is a sentence instead of a session that connects and then ignores the visitor.
+   * Default `true`. See `./mic` for why this is not paranoia.
+   */
+  micPreflight?: boolean;
 }
 
 export type WhissleEvent =
@@ -127,6 +158,61 @@ export type WhissleEvent =
    */
   | "user-interim"
   | "agent-transcript"
+  /**
+   * The reply SO FAR in the current turn, re-emitted each time another sentence is
+   * aggregated. `agent-transcript` still arrives once at the end of the turn.
+   *
+   * The one to render when the agent is mid-answer. `agent-transcript` fires when the
+   * bot STOPS speaking, so on a long reply a transcript built from it alone sits empty
+   * for ten seconds and then dumps a paragraph.
+   */
+  | "agent-partial"
+  /**
+   * One word of the reply, at the moment the voice says it (`bot-tts-text`).
+   *
+   * The finest granularity the pipeline offers, and the only one that can drive a
+   * caption that keeps time with the audio. Use `agent-partial` for a transcript and
+   * this for a karaoke-style live caption; wiring both is normal.
+   */
+  | "agent-word"
+  /**
+   * The caller started speaking, according to the server's voice-activity detector.
+   *
+   * The barge-in edge: if this arrives between `speaking-started` and
+   * `speaking-stopped`, the visitor has just interrupted the agent. (The interruption
+   * itself is handled server-side — this is how you find out it happened.)
+   */
+  | "listening-started"
+  | "listening-stopped"
+  /**
+   * The agent has called a tool, and has therefore gone quiet on purpose. Carries the
+   * tool name, its arguments, and the earcon the platform chose.
+   */
+  | "tool-started"
+  /** An interim update from inside a long-running tool, with a line to show. */
+  | "tool-progress"
+  /** A tool came back — with its result, whether it succeeded, and any citations. */
+  | "tool-finished"
+  /**
+   * One boolean for "the agent is working, that's why it's quiet". Collapses however
+   * many tools are in flight into the single thing a UI needs. This is what the
+   * dashboard's thinking strip is built on.
+   */
+  | "thinking"
+  /** A one-line caption of the reply being spoken right now, from the agent's own
+   *  `[[GIST:…]]` marker. Present only on agents that emit one. */
+  | "gist"
+  /**
+   * The live acoustic read of the caller — emotion and intent, with the distributions
+   * behind them. Read `./signals` before rendering the emotion: absence is the honest
+   * state and `NEUTRAL` is deliberately not reported.
+   */
+  | "user-metadata"
+  /** One event from the pipeline's live signal stream (barge-in, endpointing,
+   *  language switches, entities, flow state). Schema v1; see `./signals`. */
+  | "signal"
+  /** This session hit the anonymous demo cap and is about to end. */
+  | "demo-limit"
   | "bot-ready"
   | "avatar-ready"
   | "avatar-failed"
@@ -147,7 +233,37 @@ export type WhissleEvent =
   | "server-message"
   | "error";
 
-type Handler = (payload?: unknown) => void;
+/**
+ * Why something failed, in a form you can branch on.
+ *
+ * The `error` event's first argument stays the human sentence it has always been; this
+ * arrives as a SECOND argument, so existing handlers are untouched and new ones can
+ * tell "top up your wallet" apart from "this domain isn't on the allowlist" — two
+ * failures that look identical from a page and have completely different fixes.
+ *
+ *   agent.on("error", (message, detail) => {
+ *     if ((detail as WhissleErrorDetail)?.code === "no-credit") showBillingLink();
+ *     else showMessage(String(message));
+ *   });
+ */
+export interface WhissleErrorDetail {
+  code:
+    | "no-credit"
+    | "origin-not-allowed"
+    | "expired"
+    | "not-found"
+    | "rate-limited"
+    | "unavailable"
+    | "microphone"
+    | "autoplay"
+    | "demo-limit"
+    | "agent-down"
+    | "connection";
+  /** The HTTP status, when the failure came from a request. */
+  status?: number;
+}
+
+type Handler = (payload?: unknown, detail?: unknown) => void;
 
 /**
  * Accept either half of what a backend can hand back.
@@ -178,6 +294,55 @@ function withTimeout<T>(work: Promise<T>, ms: number, message: string): Promise<
       },
     );
   });
+}
+
+/** FastAPI puts its error text in `detail`. Best-effort — a non-JSON body is still
+ *  an error, it just doesn't get to explain itself. */
+async function detailOf(res: Response): Promise<string | undefined> {
+  try {
+    const body = (await res.json()) as { detail?: unknown };
+    return typeof body?.detail === "string" ? body.detail : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Why the session mint refused, said so the person reading it can act. */
+function mintFailure(
+  status: number,
+  detail: string | undefined,
+): { code: WhissleErrorDetail["code"]; message: string } {
+  switch (status) {
+    case 401:
+      return { code: "expired", message: detail || "That key isn't valid for this agent." };
+    case 402:
+      return {
+        code: "no-credit",
+        message: "This agent is out of credit. Top up the workspace wallet to start sessions.",
+      };
+    case 403:
+      return {
+        code: "origin-not-allowed",
+        message:
+          "This site isn't allowed to embed this agent. Add " +
+          (typeof location !== "undefined" ? location.origin : "its origin") +
+          " to the allowed origins in the agent's Embed settings.",
+      };
+    case 404:
+      return {
+        code: "not-found",
+        message: "This agent isn't available to embed — check the agent id, and that embedding is turned on.",
+      };
+    case 429:
+      return { code: "rate-limited", message: detail || "Too many sessions right now — try again shortly." };
+    case 503:
+      return { code: "unavailable", message: "Embedding isn't available right now." };
+    default:
+      return {
+        code: "connection",
+        message: detail || `Couldn't start the agent (${status}).`,
+      };
+  }
 }
 
 /** Payload of the `avatar-ready` event. */
@@ -246,6 +411,9 @@ export class WhissleAgent {
   private _turnSpoken = "";
   private _turnUnspoken = "";
   private _turnLegacy = "";
+  private earcons: EarconPlayer;
+  private thinking = new ThinkingTracker();
+  private textChannel: TextChannel | null = null;
 
   constructor(options: WhissleAgentOptions) {
     if (!options?.apiKey && !options?.sessionToken && !options?.getToken) {
@@ -277,6 +445,13 @@ export class WhissleAgent {
       iceServers: this.iceFromCaller ? options.iceServers! : DEFAULT_ICE,
     };
     this.avatarOpts = normalizeAvatar(options.avatar);
+    this.earcons = new EarconPlayer(
+      options.earcons === false
+        ? { enabled: false }
+        : options.earcons === true || options.earcons === undefined
+          ? {}
+          : options.earcons,
+    );
   }
 
   get state() {
@@ -321,14 +496,19 @@ export class WhissleAgent {
     return this;
   }
 
-  private emit(event: WhissleEvent, payload?: unknown) {
+  private emit(event: WhissleEvent, payload?: unknown, detail?: unknown) {
     this.handlers.get(event)?.forEach((h) => {
       try {
-        h(payload);
+        h(payload, detail);
       } catch (err) {
         console.error(`[whissle] handler for "${event}" threw`, err);
       }
     });
+  }
+
+  /** Emit an `error` with a machine-readable code alongside the sentence. */
+  private fail(message: string, code: WhissleErrorDetail["code"], status?: number) {
+    this.emit("error", message, { code, ...(status ? { status } : {}) } as WhissleErrorDetail);
   }
 
   /**
@@ -367,11 +547,16 @@ export class WhissleAgent {
       }),
     });
     if (!res.ok) {
-      throw new Error(
-        res.status === 403
-          ? "This site isn't allowed to embed this agent. Add its origin in the agent's Embed settings."
-          : "Couldn't start the agent (check the key + agent id).",
-      );
+      // Every one of these is a different problem with a different fix, and they used
+      // to collapse into one sentence. "Couldn't start the agent (check the key + agent
+      // id)" is actively misleading when the truth is an empty wallet or a domain that
+      // was never added to the allowlist — the developer goes and checks the key,
+      // which is fine, and learns nothing.
+      const { code, message } = mintFailure(res.status, await detailOf(res));
+      const err = new Error(message) as Error & { code: WhissleErrorDetail["code"]; status: number };
+      err.code = code;
+      err.status = res.status;
+      throw err;
     }
     return (await res.json()) as WhissleSessionInfo;
   }
@@ -392,6 +577,26 @@ export class WhissleAgent {
     const asked = this.opts.transport || "auto";
     if (asked === "webrtc" || asked === "livekit") return asked;
     return session.transport?.kind === "livekit" ? "livekit" : "webrtc";
+  }
+
+  /**
+   * What to try when the chosen transport didn't come up. `null` to give up.
+   *
+   * Only ever one hop. A retry loop over transports on a session token that has
+   * already started a metered bot is a good way to bill someone twice for a call they
+   * never had.
+   */
+  private fallbackKind(
+    session: WhissleSessionInfo,
+    failed: "webrtc" | "livekit",
+  ): "webrtc" | "livekit" | null {
+    if ((this.opts.transport || "auto") !== "auto") return null;
+    const listed = (session.transport as { fallbacks?: Array<{ kind?: string }> } | undefined)
+      ?.fallbacks;
+    for (const f of listed ?? []) {
+      if ((f?.kind === "webrtc" || f?.kind === "livekit") && f.kind !== failed) return f.kind;
+    }
+    return null;
   }
 
   /** Query params both `/api/embed/offer` and `/api/embed/livekit` accept. */
@@ -416,9 +621,26 @@ export class WhissleAgent {
     // is running long before the agent's first words rather than racing them.
     // No-op on desktop. See `./mobile-audio`.
     primeBoostedPlayout();
+    // Same gesture, same reason: an AudioContext created anywhere but inside the click
+    // stays suspended, and a suspended context makes every tool cue a silent no-op
+    // with nothing in the console to explain it.
+    this.earcons.prime();
     this._state = "connecting";
     this.emit("connecting");
     try {
+      // Only in a real browser. Outside one there is no microphone to check and no
+      // visitor to tell, and `checkMicrophone` would honestly report "this browser
+      // can't reach a microphone" for something that is not a browser.
+      if (this.opts.micPreflight !== false && typeof window !== "undefined") {
+        const problem = await checkMicrophone();
+        if (problem) {
+          const err = new Error(problem.message) as Error & {
+            code: WhissleErrorDetail["code"];
+          };
+          err.code = "microphone";
+          throw err;
+        }
+      }
       const session = await this.mintSession();
       this._session = session;
       const token = session.token;
@@ -429,12 +651,33 @@ export class WhissleAgent {
 
       const kind = this.transportFor(session);
       this._transport = kind;
-      if (kind === "livekit") await this.connectLiveKit(session, avatarCode);
-      else await this.connectWebRTC(session, avatarCode);
+      try {
+        if (kind === "livekit") await this.connectLiveKit(session, avatarCode);
+        else await this.connectWebRTC(session, avatarCode);
+      } catch (err) {
+        // The mint doesn't just name a transport, it names what to try INSTEAD —
+        // `transport.fallbacks` is a real field the gateway has been sending all along
+        // (today: LiveKit primary, SmallWebRTC fallback) and this SDK ignored it, so a
+        // room the browser couldn't reach was the end of the session rather than a
+        // detour. Only taken when the caller left the choice to us: someone who wrote
+        // `transport: "livekit"` asked for a specific transport and should be told it
+        // failed, not quietly moved somewhere else.
+        const fallback = this.fallbackKind(session, kind);
+        if (!fallback) throw err;
+        await this.teardown();
+        this._transport = fallback;
+        if (fallback === "livekit") await this.connectLiveKit(session, avatarCode);
+        else await this.connectWebRTC(session, avatarCode);
+      }
     } catch (err) {
       this._state = "idle";
       void this.teardown();
-      this.emit("error", err instanceof Error ? err.message : String(err));
+      const coded = err as { code?: WhissleErrorDetail["code"]; status?: number };
+      this.fail(
+        err instanceof Error ? err.message : String(err),
+        coded?.code ?? "connection",
+        coded?.status,
+      );
       throw err;
     }
   }
@@ -531,6 +774,11 @@ export class WhissleAgent {
         // clearing it here would throw the only copy some gateways send away.
         this._turnSpoken = "";
         this._turnUnspoken = "";
+        // The bot talking is the ground truth that the wait is over — it beats any
+        // bookkeeping, because a result frame can be dropped on the way here and
+        // audio cannot be faked. Without this, one lost result pins a "working…"
+        // affordance on screen for the rest of the call.
+        this.settleThinking(this.thinking.clear());
         this.emit("speaking-started");
       },
       onBotStoppedSpeaking: () => {
@@ -551,14 +799,24 @@ export class WhissleAgent {
         if (!seg) return;
         if (spoken) this._turnSpoken = this._turnSpoken ? `${this._turnSpoken} ${seg}` : seg;
         else this._turnUnspoken = this._turnUnspoken ? `${this._turnUnspoken} ${seg}` : seg;
+        // The turn so far, live. Same de-duplication as the final flush — prefer the
+        // spoken copy, fall back to the unspoken one — so the partial and the final
+        // are the same text growing, never two different readings of one reply.
+        const so_far = this._turnSpoken || this._turnUnspoken;
+        if (so_far) this.emit("agent-partial", so_far);
       },
       onBotLegacyOutput: (segment) => {
         const seg = segment.trim();
         if (seg) this._turnLegacy = this._turnLegacy ? `${this._turnLegacy} ${seg}` : seg;
       },
+      onBotWord: (word) => {
+        if (word) this.emit("agent-word", word);
+      },
       onUserTranscript: (text, final) => {
         this.emit(final ? "user-transcript" : "user-interim", text);
       },
+      onUserStartedSpeaking: () => this.emit("listening-started"),
+      onUserStoppedSpeaking: () => this.emit("listening-stopped"),
       onRemoteAudioTrack: (track) => {
         this.remoteTrack = track;
         // With a browser-rendered avatar, Simli plays the lip-synced audio. Also
@@ -576,33 +834,138 @@ export class WhissleAgent {
           // track.
           attachBoostedPlayout(stream, this.audioEl);
           this.audioEl.play().catch(() => {
-            this.emit("error", "Browser blocked audio autoplay — a user gesture is required.");
+            this.fail(
+              "Your browser blocked the agent's audio. Click anywhere on the page to allow it.",
+              "autoplay",
+            );
           });
         }
       },
-      onServerMessage: (data) => {
-        const msg = data as { type?: string; error?: string; message?: string; t?: string; pcm?: string };
-        // Clean 16 kHz PCM mirrored from the bot's TTS — the good avatar input.
-        if (msg?.t === "simli-audio" && msg.pcm) {
-          this.avatar?.sendPcm(decodeBase64(msg.pcm));
-          return;
-        }
-        if (msg?.t === "simli-clear") {
-          this.avatar?.clearBuffer();
-          return;
-        }
-        if (msg?.type === "error" && msg?.error === "no_credits") {
-          this.emit("error", msg.message || "This agent has run out of credits.");
-          return;
-        }
-        // Everything else is the agent talking to YOUR app. The SDK has no
-        // opinion about it — an interview announcing which question it just
-        // reached, a form reporting a field captured — so hand it over intact
-        // rather than dropping what it doesn't recognise.
-        this.emit("server-message", data);
-      },
-      onError: (message) => this.emit("error", message),
+      onServerMessage: (data) => this.routeServerMessage(data),
+      onError: (message) => this.fail(message, "connection"),
     };
+  }
+
+  /**
+   * Everything the pipeline says that isn't speech.
+   *
+   * One channel, three discriminators, and they must be read in this order — `kind`
+   * (tool events and the live signal stream), then `t` (the short-tag UI events), then
+   * `type` (the unlabelled session-ending notices). They are genuinely different
+   * families that happen to share a pipe.
+   *
+   * Before 0.5.0 this method was four lines: two avatar frames, one credit check, and
+   * `emit("server-message", data)` for absolutely everything else. That is why an
+   * embed was silent during tool calls and had no way to explain a pause — the
+   * information was arriving the whole time, unlabelled and unparsed, and the only way
+   * to use any of it was to re-implement the wire format by hand off the console.
+   *
+   * Everything still ALSO goes out as `server-message`, unchanged, so an integrator
+   * who already parses it themselves keeps working exactly as before.
+   */
+  private routeServerMessage(data: unknown): void {
+    const msg = (data ?? {}) as {
+      type?: string;
+      error?: string;
+      message?: string;
+      t?: string;
+      text?: string;
+      pcm?: string;
+    };
+
+    // Avatar frames first: they arrive several times a second and never concern the app.
+    if (msg.t === "simli-audio" && msg.pcm) {
+      this.avatar?.sendPcm(decodeBase64(msg.pcm));
+      return;
+    }
+    if (msg.t === "simli-clear") {
+      this.avatar?.clearBuffer();
+      return;
+    }
+
+    const tool = parseToolEvent(data);
+    if (tool) {
+      if (tool.phase === "started") {
+        // The cue goes FIRST, ahead of any handler work. It is the low-latency half of
+        // this signal and must not queue behind whatever an integrator does with the
+        // event — a cue that lands after the tool has finished is an echo.
+        this.earcons.play(tool.data.sound);
+        this.settleThinking(this.thinking.start(tool.data));
+        this.emit("tool-started", tool.data satisfies ToolStarted);
+      } else if (tool.phase === "progress") {
+        this.settleThinking(this.thinking.progress(tool.data));
+        this.emit("tool-progress", tool.data satisfies ToolProgress);
+      } else {
+        // Only a FAILURE carries a cue here — a success is about to be narrated by the
+        // agent, so a chime on every result would turn the bank into wallpaper.
+        this.earcons.play(tool.data.sound);
+        this.settleThinking(this.thinking.finish(tool.data));
+        this.emit("tool-finished", tool.data satisfies ToolFinished);
+      }
+      this.emit("server-message", data);
+      return;
+    }
+
+    const signal = parseSignal(data);
+    if (signal) {
+      this.emit("signal", signal);
+      this.emit("server-message", data);
+      return;
+    }
+
+    const meta = parseUserMetadata(data);
+    if (meta) {
+      this.emit("user-metadata", meta);
+      this.emit("server-message", data);
+      return;
+    }
+
+    switch (msg.t) {
+      case "gist":
+        if (msg.text) this.emit("gist", msg.text);
+        break;
+      case "mic_dead":
+        // The server received no audio at all. Distinct from `mic-lost`, which is the
+        // device dying: here the device is fine and the audio isn't arriving.
+        this.fail(
+          msg.text || "We're not hearing anything from your microphone.",
+          "microphone",
+        );
+        break;
+      case "agent_error":
+        this.fail(msg.text || "The agent is having trouble responding.", "agent-down");
+        break;
+    }
+
+    // The unlabelled notices. Both of these END the session, which is why they are
+    // worth naming rather than leaving for the app to recognise.
+    //
+    // These two are CONSUMED, not forwarded — they are errors, not application data,
+    // and the existing contract has never leaked them. The tool/signal/metadata events
+    // above go out as `server-message` as well precisely because the opposite is true
+    // there: forwarding was the only way to reach them before 0.5.0, and taking that
+    // away to make the routing tidier would break every integrator who parses them by
+    // hand today.
+    if (msg.type === "error" && msg.error === "no_credits") {
+      this.fail(msg.message || "This agent has run out of credits.", "no-credit");
+      return;
+    }
+    if (msg.type === "demo-limit") {
+      this.emit("demo-limit", data);
+      this.fail("You've reached the demo limit for this agent.", "demo-limit");
+      return;
+    }
+
+    // Everything else is the agent talking to YOUR app. The SDK has no opinion about
+    // it — an interview announcing which question it just reached, a form reporting a
+    // field captured — so hand it over intact rather than dropping what it doesn't
+    // recognise.
+    this.emit("server-message", data);
+  }
+
+  /** Emit `thinking` only when the state actually moved. */
+  private settleThinking(next: ThinkingState | null): void {
+    if (next) this.emit("thinking", next);
   }
 
   /** SmallWebRTC — the transport every 0.1.x session used. */
@@ -640,6 +1003,11 @@ export class WhissleAgent {
         },
         onUserTranscript: (data: { text: string; final?: boolean }) =>
           cb.onUserTranscript(data.text, Boolean(data.final)),
+        onUserStartedSpeaking: cb.onUserStartedSpeaking,
+        onUserStoppedSpeaking: cb.onUserStoppedSpeaking,
+        // Word-level, as the TTS says it. Separate from `bot-output` on purpose —
+        // see `SessionCallbacks.onBotWord`.
+        onBotTtsText: (data: { text?: string }) => cb.onBotWord(data?.text ?? ""),
         // No `onBotTranscript` here: PipecatClient routes the deprecated
         // `bot-transcription` to its own callback, and subscribing to it only
         // buys a console warning on every session. `bot-output` still arrives
@@ -790,7 +1158,11 @@ export class WhissleAgent {
   send(type: string, data?: unknown): void {
     try {
       if (this.lk) {
-        this.lk.send({ type, ...(data !== undefined ? { data } : {}) });
+        // Was `lk.send({type, data})`, which the bot does not recognise and drops —
+        // so every control message on the LiveKit transport (the one production
+        // sessions actually use) went nowhere, silently. See `LiveKitSession.
+        // sendClientMessage`.
+        this.lk.sendClientMessage(type, data);
         return;
       }
       (this.client as unknown as {
@@ -799,6 +1171,156 @@ export class WhissleAgent {
     } catch {
       /* a dropped control message is not worth ending the session over */
     }
+  }
+
+  /**
+   * Type to the agent.
+   *
+   * Same agent, same prompt, same knowledge base and tools as the voice channel — a
+   * Whissle agent is one brain with several mouths, and until 0.5.0 this SDK could
+   * only reach one of them. Two situations it answers, both extremely common on a
+   * public page: a visitor who denies the microphone, and a visitor who does not want
+   * to talk out loud.
+   *
+   * It behaves differently depending on whether a call is up, and that is the point:
+   *
+   *   • **During a live voice session** the text is injected into the SAME conversation
+   *     over the data channel, and the agent answers it out loud, in context. That is
+   *     the voice↔text handoff: spell an email address rather than repeating it four
+   *     times, paste a reference number, type the thing you would rather not say in an
+   *     open-plan office. Resolves immediately with `null` — the reply comes back as
+   *     speech, through `agent-transcript` like any other turn.
+   *
+   *   • **With no session up** it runs a text turn over HTTP and resolves with the
+   *     reply, tools used and citations. Consecutive calls continue one thread, so the
+   *     agent remembers the conversation rather than starting cold each message. This
+   *     needs no microphone and no WebRTC at all — a text-only widget never calls
+   *     `start()`.
+   *
+   * Requires text to be enabled on the agent (`session.text_enabled`); without it the
+   * gateway answers 404 and this rejects saying so.
+   */
+  async sendText(message: string, opts: SendTextOptions = {}): Promise<TextTurn | null> {
+    const text = message?.trim();
+    if (!text) return null;
+    if (this._state === "connected") {
+      // `user-text` is a small JSON control message on the data channel. Images
+      // deliberately do NOT go this way: the channel chunks at ~64 KB and the far side
+      // has no image handler on this path, so offering it would be offering a send
+      // that quietly does nothing.
+      this.send("user-text", { text });
+      return null;
+    }
+    const channel = await this.ensureTextChannel();
+    try {
+      const turn = await channel.send(text, opts);
+      // Emit it as an ordinary turn as well, so a UI wired for voice lights up for
+      // typed messages without a second code path.
+      if (turn.reply) this.emit("agent-transcript", turn.reply);
+      return turn;
+    } catch (err) {
+      const e = err as WhissleTextError;
+      this.fail(
+        e?.message || "Couldn't reach the agent.",
+        e?.code === 402
+          ? "no-credit"
+          : e?.code === 403
+            ? "origin-not-allowed"
+            : e?.code === 401
+              ? "expired"
+              : e?.code === 404
+                ? "not-found"
+                : e?.code === 429
+                  ? "rate-limited"
+                  : "connection",
+        e?.code,
+      );
+      throw err;
+    }
+  }
+
+  /** The thread `sendText` is on over HTTP, once one exists. Store it to resume the
+   *  same conversation on a later page load. */
+  get textThread(): string | null {
+    return this.textChannel?.thread ?? null;
+  }
+
+  /** Continue an HTTP text thread from a previous page load. */
+  resumeTextThread(conversationId: string): void {
+    void this.ensureTextChannel().then((c) => c.resume(conversationId));
+  }
+
+  /**
+   * The text door for this agent, minting a session if we don't already have one.
+   *
+   * The mint DESCRIBES where text turns go (`transport.text.connect`), so follow that
+   * rather than hard-coding the path: it is how the gateway moves the endpoint without
+   * breaking every embed in the wild. The hard-coded fallback is for a gateway old
+   * enough not to describe it yet.
+   */
+  private async ensureTextChannel(): Promise<TextChannel> {
+    if (this.textChannel) return this.textChannel;
+    const session = this._session ?? (await this.mintSession());
+    this._session = session;
+    if (session.text_enabled === false) {
+      throw new WhissleTextError(
+        404,
+        "This agent isn't set up for text. Turn on text replies in its Embed settings.",
+      );
+    }
+    const described = (session.transport as { text?: { connect?: { url?: string } } } | undefined)
+      ?.text?.connect?.url;
+    const path = described || "/api/embed/chat/turn";
+    const url = /^https?:/i.test(path) ? path : `${this.opts.baseUrl}${path}`;
+    this.textChannel = new TextChannel(url, session.token, session.session_id);
+    return this.textChannel;
+  }
+
+  /** Silence tool cues without changing anything else. Wire this to your mute button:
+   *  a visitor who mutes the agent means the sounds too. */
+  setEarconsMuted(muted: boolean): void {
+    this.earcons.setMuted(muted);
+  }
+
+  /**
+   * The microphones this browser will admit to, for a device picker.
+   *
+   * Labels are only real once permission has been granted, so call this after
+   * `start()` (or after a `checkMicrophone()`); before that a browser returns a single
+   * unlabelled placeholder and a picker built from it is a menu of nothing.
+   */
+  listMicrophones(): Promise<MediaDeviceInfo[]> {
+    return listMicrophones();
+  }
+
+  /**
+   * Switch the live session to a different microphone.
+   *
+   * Asks the transport to swap the device it already owns rather than opening a second
+   * one — holding two tracks on one input is how a device ends up locked and the
+   * session ends up deaf.
+   *
+   * LiveKit only for now; on SmallWebRTC this is a no-op and returns `false`, because
+   * failing loudly at the transport boundary would end a live call over a settings
+   * change nobody had to make.
+   */
+  setMicrophone(deviceId: string): boolean {
+    try {
+      const client = this.client as unknown as { updateMic?: (id: string) => void };
+      if (client?.updateMic) {
+        client.updateMic(deviceId);
+        return true;
+      }
+      return this.lk?.setMicrophone(deviceId) ?? false;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Check the microphone without starting a session — for a "test your mic" button,
+   *  or to ask for permission before showing the visitor a Start button that needs it. */
+  checkMicrophone(): Promise<MicProblem | null> {
+    return checkMicrophone();
   }
 
   /** End the session and clean up. */
@@ -825,6 +1347,8 @@ export class WhissleAgent {
     this.avatar = null;
     await avatar?.destroy();
     teardownBoostedPlayout();
+    this.earcons.release();
+    this.settleThinking(this.thinking.clear());
     if (this.audioEl) {
       this.audioEl.srcObject = null;
       this.audioEl.remove();

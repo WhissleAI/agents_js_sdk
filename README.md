@@ -50,8 +50,10 @@ npm install @whissle/agents
 </script>
 ```
 
-That renders a clean, theme-aware voice widget (Start button → mic → live
-transcript). Pass `accent: "#7c3aed"` to match your brand.
+That renders a clean, theme-aware widget: a Start button, a live transcript, a
+strip that says what the agent is doing when it goes quiet, and a message box for
+visitors who won't or can't talk. Pass `accent: "#7c3aed"` to match your brand,
+or `text: false` for voice only.
 
 ## A talking avatar
 
@@ -124,11 +126,17 @@ const agent = new WhissleAgent({
 agent
   .on("connected", () => console.log("live"))
   .on("user-transcript", (t) => console.log("you:", t))
+  .on("agent-partial", (t) => render(t))              // the reply as it happens
   .on("agent-transcript", (t) => console.log("agent:", t))
-  .on("error", (m) => console.error(m));
+  // Why it just went quiet. Without this a tool call is several seconds of
+  // nothing, which every visitor reads as a hang.
+  .on("thinking", (s) => strip.toggle(s.active, s.label))
+  .on("error", (m, detail) => console.error(detail?.code, m));
 
-await agent.start();   // asks for the mic, connects
+await agent.start();   // asks for the mic, checks it, connects
 // agent.setMuted(true);
+// agent.setEarconsMuted(true);
+// await agent.sendText("or just type");
 // agent.stop();
 ```
 
@@ -184,6 +192,8 @@ that doesn't have it enabled fails loudly rather than silently downgrading.
 
 ## Events
 
+The voice basics:
+
 | Event | Payload | When |
 |---|---|---|
 | `connecting` | — | `start()` called, negotiating |
@@ -192,14 +202,160 @@ that doesn't have it enabled fails loudly rather than silently downgrading.
 | `disconnected` | — | session ended |
 | `speaking-started` / `speaking-stopped` | — | agent turn boundaries |
 | `user-transcript` | `string` | a finalized user utterance |
-| `agent-transcript` | `string` | agent reply text |
+| `user-interim` | `string` | the caller's speech while still being recognised — provisional, replaced by the next one and finally by `user-transcript`. Render it greyed/italic; never store it. Without it a speaker sees nothing while they talk and assumes they aren't heard. |
+| `agent-transcript` | `string` | the agent's reply, once per turn, when it stops speaking |
+| `agent-partial` | `string` | the reply **so far** in this turn, re-emitted as each sentence lands. What to render mid-answer — `agent-transcript` fires at the end, so a transcript built from it alone sits empty and then dumps a paragraph. |
+| `agent-word` | `string` | one word, at the moment the voice says it. The only granularity fine enough for a caption that keeps time with the audio. |
+| `listening-started` / `listening-stopped` | — | the server's VAD heard the caller start/stop. A `listening-started` between `speaking-started` and `speaking-stopped` **is** a barge-in. |
 | `avatar-ready` | `{ video, faceId }` | the face is live; `video` is an `HTMLVideoElement` |
 | `avatar-failed` | `string` | no face this session — the reason. Not fatal |
-| `user-interim` | `string` | the caller's speech while still being recognised — provisional, replaced by the next one and finally by `user-transcript`. Render it greyed/italic; never store it. Without it a speaker sees nothing while they talk and assumes they aren't heard. |
-| `mic-lost` | — | the microphone stopped producing audio mid-session (unplugged, taken by another app, permission revoked). The session stays up, so tell the caller rather than tearing down. |
-| `mic-restored` | — | it came back. Only ever follows `mic-lost`. |
-| `server-message` | `unknown` | a structured message from the agent that the SDK doesn't consume itself — your own application events, passed through untouched |
-| `error` | `string` | mic denied, origin not allowed, credits out, … |
+| `mic-lost` / `mic-restored` | — | the microphone stopped producing audio mid-session (unplugged, taken by another app, permission revoked) and came back. The session stays up, so tell the caller rather than tearing down. |
+| `server-message` | `unknown` | every structured message from the agent, passed through untouched — including the ones below, so nothing you already parse by hand goes away |
+| `error` | `string`, `WhissleErrorDetail` | see [Errors](#errors) |
+
+What the agent is **doing** — new in 0.5.0, and the reason an embedded agent used
+to go silent for seconds at a time with no explanation:
+
+| Event | Payload | When |
+|---|---|---|
+| `thinking` | `{ active, tool?, label? }` | one boolean for "it's working, that's why it's quiet". Collapses however many tools are in flight into a single edge each way, and clears when the agent starts speaking. This is what a "thinking strip" hangs off. |
+| `tool-started` | `{ id, name, arguments, sound }` | the agent called a tool. The SDK plays the earcon itself; `sound` is exposed so you can do your own. |
+| `tool-progress` | `{ id, name, display, data }` | an interim line from inside a long tool ("Reading source 2 of 3…") |
+| `tool-finished` | `{ id, name, ok, result, evidence }` | it came back. `ok` is `undefined` — not `false` — when the tool timed out and its success is genuinely unknown. `evidence` carries citations when it answered from a document. |
+| `gist` | `string` | a one-line caption of the reply being spoken right now. Only on agents configured to emit one. |
+| `user-metadata` | `UserMetadata` | the live acoustic read of the caller — see [Emotion](#emotion-and-the-neutral-problem) before you render it |
+| `signal` | `LiveSignal` | one event from the pipeline's live signal stream (barge-in, endpointing, language switches, entities, flow state). Schema v1. |
+| `demo-limit` | `unknown` | this session hit the anonymous demo cap and is ending |
+
+Correlate tool events by `id` (`tool_call_id`), never by `name` — two calls to the
+same tool can be in flight at once.
+
+## Tool earcons
+
+When an agent calls a tool it stops talking for as long as the tool takes. Without
+a cue that is dead air, and every caller reads dead air as a hang. The platform
+picks a sound per tool — deterministically, including for tools invented at
+runtime — and sends its name; this SDK plays it.
+
+On by default. Prime happens inside `start()`, which is why `start()` must be
+called from a click: browsers leave an `AudioContext` suspended otherwise and
+every cue becomes a silent no-op.
+
+```ts
+new WhissleAgent({ apiKey: "wpk_…", agentId: "…",
+  earcons: false,                        // silent tool calls
+  earcons: { volume: 0.6 },              // quieter
+  earcons: { bankUrl: "/sounds/tool" },  // your own copy of the real clips
+});
+
+agent.setEarconsMuted(true);             // wire this to your mute button
+```
+
+**The cues are synthesised, not sampled.** whissle.ai plays 56 mastered mp3s out
+of its own `public/`; an embed can't — that path 404s on your origin, and the
+gateway does not serve the bank. The alternatives were bundling ~230 KB of audio
+into a widget SDK or fetching on first tool call, and a cue that arrives after a
+network round-trip is an echo, not a cue. So the SDK builds them from
+oscillators: zero bytes, no request, and the first cue is as fast as the
+thousandth. They are not byte-identical to the dashboard's, but they are the same
+language — same categories, same meanings, same tool-to-sound mapping, so one
+tool always sounds the same and different kinds of work sound different. Point
+`bankUrl` at a copy of the bank if you want the exact clips.
+
+## Text
+
+The same agent, typed. One brain, several mouths — same prompt, knowledge base
+and tools as the voice channel.
+
+```ts
+// No call up: an HTTP turn. Needs no microphone and no WebRTC at all.
+const turn = await agent.sendText("what's your refund policy?");
+turn.reply;        // the whole reply
+turn.toolsUsed;    // ["search_knowledge_base"]
+turn.evidence;     // citations, when it answered from a document
+
+// During a live call: injected into the SAME conversation, answered out loud.
+// Resolves with null — the reply arrives as speech, via agent-transcript.
+await agent.sendText("k.singla@example.com");
+```
+
+Consecutive calls continue one thread (`agent.textThread`, and
+`agent.resumeTextThread(id)` to pick it up on a later page load). Images can ride
+along on the HTTP path: `sendText(text, { images: ["data:image/png;base64,…"] })`.
+
+Requires text to be enabled on the agent — the session mint reports
+`agent.session.text_enabled`, and `sendText` rejects with a 404 saying so if it
+isn't.
+
+**No streaming here, deliberately.** The embed text endpoint answers with one
+JSON body. The SSE envelope (`open` → `delta`* → `done`) lives on the
+authenticated `/api/chat` route, which a browser holding a publishable key cannot
+call and should not be able to. `sendText` resolves once, with the whole reply —
+a fake stream that arrives all at once would be a worse lie than no stream.
+
+## Errors
+
+`error` carries the sentence it always has, plus a second argument you can branch
+on. Existing one-argument handlers are unaffected.
+
+```ts
+agent.on("error", (message, detail) => {
+  if ((detail as WhissleErrorDetail)?.code === "no-credit") showBillingLink();
+  else show(String(message));
+});
+```
+
+| `code` | Means |
+|---|---|
+| `no-credit` | the workspace wallet is empty (402, or mid-session) |
+| `origin-not-allowed` | this domain isn't in the agent's Embed settings (403). The message names the origin to add. |
+| `expired` | the key or session token isn't valid (401) |
+| `not-found` | no such agent, or embedding is off (404) |
+| `rate-limited` | too many sessions or messages (429) |
+| `unavailable` | embedding is off on this gateway (503) |
+| `microphone` | blocked, busy, missing, or the server is receiving no audio |
+| `autoplay` | the browser blocked the agent's audio until a gesture |
+| `agent-down` | the agent's model is failing |
+| `demo-limit` | the anonymous demo cap |
+| `connection` | anything else |
+
+## Microphone
+
+`start()` opens the microphone and checks it **before** connecting, because
+`enableMic: true` runs its own `getUserMedia` and does not reliably throw when it
+fails — the session comes up, the server receives zero audio frames, and the
+visitor talks to a widget that ignores them for the whole call. Now that is a
+sentence instead, with the fix in it ("click the padlock, choose Allow, then
+reload").
+
+```ts
+const problem = await agent.checkMicrophone();   // null when it's fine
+const mics = await agent.listMicrophones();      // labels are real only after permission
+agent.setMicrophone(mics[0].deviceId);           // LiveKit; no-op + false on SmallWebRTC
+```
+
+Pass `micPreflight: false` if your page manages permission itself.
+
+## Emotion and the NEUTRAL problem
+
+`user-metadata` reports what the pipeline heard in the caller's voice. Read this
+before rendering it.
+
+**`emotion` is `undefined` whenever the platform said `NEUTRAL`,** and that is
+deliberate. The platform writes `NEUTRAL` both when the head genuinely read a calm
+speaker and as the *fallback* when no reading was produced at all — no metadata
+sidecar on that deployment, a language the head isn't trusted on, a classifier
+call that failed. The wire is identical in both cases. So a `NEUTRAL` supports
+exactly one honest statement — *nothing was detected* — and surfacing it as a
+reading would let you draw "the caller is calm" out of "we don't know".
+
+`undefined` is therefore the whole answer for both "no reading" and "neutral".
+When a real emotion *is* reported it comes with the model's own probability, which
+tops out around 0.63 on low-arousal states — render it as a leaning, not a fact.
+`raw` has the untouched payload, distributions included, if you want to decide for
+yourself.
+
+## Talking to the running agent
 
 ## Talking to the running agent
 
@@ -220,6 +376,11 @@ agent.send("set-difficulty", { level: "hard" });
 than thrown, because a lost control message should never take down a live
 conversation.
 
+**Fixed in 0.5.0:** on the LiveKit transport — the one every production session
+uses — `send` published an envelope the agent does not read, so every control
+message was dropped by the far side with nothing anywhere to say so. `send` now
+works on both transports.
+
 ## Options
 
 ```ts
@@ -232,11 +393,19 @@ new WhissleAgent({
   transport: "auto",     // "auto" | "webrtc" | "livekit"
   baseUrl: "…",          // override the API host (self-hosted / staging)
   iceServers: [ … ],     // custom ICE/TURN — wins over anything the mint suggests
+  earcons: true,         // true | false | { enabled, volume, bankUrl }
+  micPreflight: true,    // check the mic before connecting
 });
 ```
 
 Read-only: `agent.state`, `agent.transport`, `agent.session` (what the mint said —
-agent name, greeting, TTL), `agent.videoElement`.
+agent name, greeting, TTL, `text_enabled`), `agent.videoElement`,
+`agent.textThread`.
+
+`transport: "auto"` follows the transport the session mint describes — today
+LiveKit — and, if that fails to come up, takes the fallback the *same mint* named
+(SmallWebRTC). Naming a transport explicitly opts out of that: you asked for a
+specific one, so it fails loudly rather than quietly moving you somewhere else.
 
 ## Bundle size
 
@@ -245,12 +414,15 @@ are loaded on demand.
 
 | build | size | notes |
 |---|---|---|
-| `dist/index.js` (ESM), `dist/index.cjs` | 350 KB | the SmallWebRTC transport is bundled in — see "Node ESM" below |
-| your app's entry chunk | **+7.9 KB raw / +0.5 KB gzip** vs 0.1.0 | measured with esbuild + code splitting |
-| avatar chunk | 571 KB raw / 148 KB gzip | fetched only when `avatar` is set |
-| LiveKit chunk | 548 KB raw / 143 KB gzip | fetched only on the LiveKit transport |
-| `dist/index.global.js` (`<script>`) | 436 KB raw / 120 KB gzip | voice only; +8 KB vs 0.1.0 |
-| `dist/index.full.global.js` | 1.49 MB raw / 414 KB gzip | avatar + LiveKit bundled, for `<script>` pages |
+| `dist/index.js` (ESM), `dist/index.cjs` | 373 KB | the SmallWebRTC transport is bundled in — see "Node ESM" below |
+| your app's entry chunk | 448 KB raw / **123 KB gzip** | measured with esbuild + code splitting. **+4.4 KB gzip vs 0.4.2** — the whole of 0.5.0 (earcons, tool events, signals, text, mic checks) |
+| avatar chunk | 557 KB raw / 145 KB gzip | fetched only when `avatar` is set |
+| LiveKit chunk | 535 KB raw / 140 KB gzip | fetched only on the LiveKit transport |
+| `dist/index.global.js` (`<script>`) | 450 KB raw / 125 KB gzip | voice only |
+| `dist/index.full.global.js` | 1.51 MB raw / 412 KB gzip | avatar + LiveKit bundled, for `<script>` pages |
+
+The earcons contribute nothing measurable: they are oscillators and a table, not
+audio. Shipping the real mp3 bank instead would have cost ~230 KB.
 
 `unpkg`/`jsdelivr` still resolve to the **lean** global, so nothing you already
 ship gets bigger. For an avatar or LiveKit from a plain `<script>` tag, point at
@@ -288,16 +460,28 @@ in Node (ESM or CJS) is safe. Note the SDK still needs a browser to actually
   site you haven't listed in the agent's Embed settings. Add your domain there,
   or mint server-side (above), where origins don't apply.
 - **Metering**: each session debits your Whissle workspace wallet; a session ends
-  automatically if credit runs out.
+  automatically if credit runs out (`error` with `code: "no-credit"`).
+- **Accessibility**: the built-in widget marks its error bar `role="alert"` and its
+  thinking strip `aria-live="polite"`, labels the message box, and drops the
+  pulsing dot under `prefers-reduced-motion`. Everything else about your UI is
+  yours — the SDK is events, not markup.
+- **SSR**: importing the package on a server is safe and every browser-only path
+  (WebAudio, `navigator`, `document`) is guarded. It still needs a browser to run
+  a session.
 
 ## Testing
 
-`npm test` covers the decisions `start()` makes before any media flows:
-credential selection, transport choice, the query params the gateway is asked
-for, and the audio-only fallback when an avatar mint fails. Anything needing a
-real browser — the WebRTC handshake, the Simli render loop, LiveKit room join,
-autoplay behaviour — is **not** covered by the suite and has to be exercised in a
-browser.
+`npm test` — 213 cases, Vitest, no browser needed. They cover the decisions
+`start()` makes before any media flows (credential selection, transport choice
+and fallback, the query params the gateway is asked for, the mic preflight, the
+audio-only path when an avatar mint fails), the transcript/turn de-duplication,
+and the wire formats: the outbound `client-message` envelope, the earcon clip-name
+guard, the tool-event parse, the thinking bookkeeping, the `NEUTRAL` suppression,
+and the text channel.
+
+Anything needing a real browser — the WebRTC handshake, the Simli render loop, an
+actual LiveKit room join, autoplay behaviour, and how the synthesised earcons
+*sound* — is **not** covered by the suite and has to be exercised in a browser.
 
 ## License
 

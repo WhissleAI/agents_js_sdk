@@ -17,9 +17,12 @@ class Probe extends WhissleAgent {
   constructor() {
     super({ sessionToken: "t" });
     this.on("server-message", (m) => this.seen.push(m));
-    // Stand in for a connected LiveKit session.
-    (this as unknown as { lk: { send: (m: unknown) => void } }).lk = {
-      send: (m: unknown) => this.sent.push(m),
+    // Stand in for a connected LiveKit session. `sendClientMessage` is the real
+    // method the agent must call — see the outbound tests below for why.
+    (this as unknown as {
+      lk: { sendClientMessage: (t: string, d?: unknown) => void };
+    }).lk = {
+      sendClientMessage: (t: string, d?: unknown) => this.sent.push({ t, d }),
     };
   }
 }
@@ -54,13 +57,13 @@ describe("messages to the agent", () => {
   it("sends a bare control message", () => {
     const p = new Probe();
     p.send("wrap-up");
-    expect(p.sent).toEqual([{ type: "wrap-up" }]);
+    expect(p.sent).toEqual([{ t: "wrap-up", d: undefined }]);
   });
 
   it("carries a payload when there is one", () => {
     const p = new Probe();
     p.send("set-difficulty", { level: "hard" });
-    expect(p.sent).toEqual([{ type: "set-difficulty", data: { level: "hard" } }]);
+    expect(p.sent).toEqual([{ t: "set-difficulty", d: { level: "hard" } }]);
   });
 
   it("is a no-op before the session is up", () => {
