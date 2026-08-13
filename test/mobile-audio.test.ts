@@ -136,9 +136,10 @@ describe("who gets boosted", () => {
   it("nobody on desktop — no context is ever created", async () => {
     installBrowser("Mozilla/5.0 (Macintosh; Intel Mac OS X) Chrome", false);
     const m = await mod();
+    const p = new m.BoostedPlayout();
     const el = audioEl();
-    m.primeBoostedPlayout();
-    expect(m.attachBoostedPlayout(stream(), el)).toBe(false);
+    p.prime();
+    expect(p.attach(stream(), el)).toBe(false);
     expect(el.muted).toBe(false);
     expect(FakeAudioContext.last).toBeNull();
   });
@@ -162,8 +163,9 @@ describe("who gets boosted", () => {
     (globalThis as unknown as { window: { __whissleNoAudioBoost?: boolean } }).window.__whissleNoAudioBoost =
       true;
     const m = await mod();
+    const p = new m.BoostedPlayout();
     const el = audioEl();
-    expect(m.attachBoostedPlayout(stream(), el)).toBe(false);
+    expect(p.attach(stream(), el)).toBe(false);
     expect(el.muted).toBe(false);
     expect(FakeAudioContext.last).toBeNull();
   });
@@ -174,11 +176,12 @@ describe("the graph", () => {
 
   it("is source -> compressor -> gain -> limiter -> destination, at the measured values", async () => {
     const m = await mod();
-    m.primeBoostedPlayout();
+    const p = new m.BoostedPlayout();
+    p.prime();
     const ctx = FakeAudioContext.last!;
     ctx.setState("running");
     const el = audioEl();
-    expect(m.attachBoostedPlayout(stream(), el)).toBe(true);
+    expect(p.attach(stream(), el)).toBe(true);
     expect(el.muted).toBe(true);
 
     const src = ctx.nodes.find((n) => n.kind === "source")!;
@@ -205,9 +208,10 @@ describe("the graph", () => {
 
   it("keeps the analyser as a tap — it observes, it is not in the path", async () => {
     const m = await mod();
-    m.primeBoostedPlayout();
+    const p = new m.BoostedPlayout();
+    p.prime();
     FakeAudioContext.last!.setState("running");
-    m.attachBoostedPlayout(stream(), audioEl());
+    p.attach(stream(), audioEl());
     expect(FakeAudioContext.last!.nodes.find((n) => n.kind === "analyser")!.connections).toEqual([]);
   });
 });
@@ -217,17 +221,19 @@ describe("autoplay policy and interruptions", () => {
 
   it("plays through the element while the context is suspended — quiet, never silent", async () => {
     const m = await mod();
+    const p = new m.BoostedPlayout();
     const el = audioEl();
     el.muted = true;
-    expect(m.attachBoostedPlayout(stream(), el)).toBe(false);
+    expect(p.attach(stream(), el)).toBe(false);
     expect(FakeAudioContext.last!.state).toBe("suspended");
     expect(el.muted).toBe(false);
   });
 
   it("upgrades itself when the context starts, with no second track event", async () => {
     const m = await mod();
+    const p = new m.BoostedPlayout();
     const el = audioEl();
-    m.attachBoostedPlayout(stream(), el);
+    p.attach(stream(), el);
     FakeAudioContext.last!.setState("running");
     expect(el.muted).toBe(true);
     expect(FakeAudioContext.last!.nodes.some((n) => n.kind === "gain")).toBe(true);
@@ -235,11 +241,12 @@ describe("autoplay policy and interruptions", () => {
 
   it("gives the audio back if the context is suspended mid-call, and takes it again after", async () => {
     const m = await mod();
-    m.primeBoostedPlayout();
+    const p = new m.BoostedPlayout();
+    p.prime();
     const ctx = FakeAudioContext.last!;
     ctx.setState("running");
     const el = audioEl();
-    m.attachBoostedPlayout(stream(), el);
+    p.attach(stream(), el);
     expect(el.muted).toBe(true);
     ctx.setState("suspended"); // backgrounded / a real call came in
     expect(el.muted).toBe(false);
@@ -249,7 +256,8 @@ describe("autoplay policy and interruptions", () => {
 
   it("retries on the next tap and on the tab coming back", async () => {
     const m = await mod();
-    m.primeBoostedPlayout();
+    const p = new m.BoostedPlayout();
+    p.prime();
     const ctx = FakeAudioContext.last!;
     const before = ctx.resumeCalls;
     fire("pointerdown");
@@ -259,13 +267,14 @@ describe("autoplay policy and interruptions", () => {
 
   it("hands the element back and stops listening once the session is torn down", async () => {
     const m = await mod();
-    m.primeBoostedPlayout();
+    const p = new m.BoostedPlayout();
+    p.prime();
     const ctx = FakeAudioContext.last!;
     ctx.setState("running");
     const el = audioEl();
-    m.attachBoostedPlayout(stream(), el);
+    p.attach(stream(), el);
     expect(el.muted).toBe(true);
-    m.teardownBoostedPlayout();
+    p.teardown();
     // A still-muted element after the graph is gone is a silent NEXT session.
     expect(el.muted).toBe(false);
     expect(ctx.closed).toBe(true);
@@ -275,18 +284,63 @@ describe("autoplay policy and interruptions", () => {
   });
 });
 
+describe("two agents on one page", () => {
+  beforeEach(() => installBrowser("Mozilla/5.0 (Linux; Android 14) Mobile Chrome", true));
+
+  it("do not share a graph — one stopping cannot mute the other", async () => {
+    // This state used to live on the MODULE, so `teardown()` was global: a page
+    // running a support widget alongside a demo (or simply opening a second session
+    // before the first had finished tearing down) had one agent's `stop()` close the
+    // context the other was still playing through, and mute its element on the way.
+    const m = await mod();
+    const first = new m.BoostedPlayout();
+    first.prime();
+    const ctxA = FakeAudioContext.last!;
+    ctxA.setState("running");
+    const elA = audioEl();
+    first.attach(stream(), elA);
+
+    const second = new m.BoostedPlayout();
+    second.prime();
+    const ctxB = FakeAudioContext.last!;
+    ctxB.setState("running");
+    const elB = audioEl();
+    second.attach(stream(), elB);
+
+    expect(ctxB).not.toBe(ctxA);
+    expect(elA.muted).toBe(true);
+    expect(elB.muted).toBe(true);
+
+    second.teardown();
+
+    // The one that stopped hands its element back and closes its own context…
+    expect(elB.muted).toBe(false);
+    expect(ctxB.closed).toBe(true);
+    // …and the live session is untouched: still boosted, still open.
+    expect(elA.muted).toBe(true);
+    expect(ctxA.closed).toBe(false);
+    expect(first.diagnostics().active).toBe(true);
+  });
+});
+
 describe("the avatar path is not touched", () => {
   it("an avatar session never reaches the boost — Simli owns playback there", async () => {
     installBrowser("Mozilla/5.0 (Linux; Android 14) Mobile Chrome", true);
     const boost = vi.fn();
     vi.resetModules();
     vi.doMock("../src/mobile-audio", () => ({
-      attachBoostedPlayout: boost,
-      primeBoostedPlayout: () => {},
-      teardownBoostedPlayout: () => {},
-      resumeBoostedPlayout: () => {},
+      BoostedPlayout: class {
+        prime() {}
+        attach(stream: MediaStream, el: HTMLAudioElement | null) {
+          return boost(stream, el);
+        }
+        resume() {}
+        teardown() {}
+        diagnostics() {
+          return { active: false, state: "none", gain: 3.5, rmsDb: null };
+        }
+      },
       isMobileBrowser: () => true,
-      boostDiagnostics: () => ({ active: false, state: "none", gain: 3.5, rmsDb: null }),
     }));
     const { WhissleAgent } = await import("../src/WhissleAgent");
     vi.stubGlobal("MediaStream", class {});
@@ -313,12 +367,18 @@ describe("the avatar path is not touched", () => {
     const boost = vi.fn();
     vi.resetModules();
     vi.doMock("../src/mobile-audio", () => ({
-      attachBoostedPlayout: boost,
-      primeBoostedPlayout: () => {},
-      teardownBoostedPlayout: () => {},
-      resumeBoostedPlayout: () => {},
+      BoostedPlayout: class {
+        prime() {}
+        attach(stream: MediaStream, el: HTMLAudioElement | null) {
+          return boost(stream, el);
+        }
+        resume() {}
+        teardown() {}
+        diagnostics() {
+          return { active: false, state: "none", gain: 3.5, rmsDb: null };
+        }
+      },
       isMobileBrowser: () => true,
-      boostDiagnostics: () => ({ active: false, state: "none", gain: 3.5, rmsDb: null }),
     }));
     const { WhissleAgent } = await import("../src/WhissleAgent");
     vi.stubGlobal("MediaStream", class {});

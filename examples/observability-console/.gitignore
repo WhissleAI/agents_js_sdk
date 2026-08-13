@@ -1,0 +1,5 @@
+*.wav
+sessions/*.json
+sessions/*.log
+!sessions/sample-rehearsal-session.json
+node_modules/

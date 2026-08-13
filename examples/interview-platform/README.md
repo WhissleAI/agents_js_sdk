@@ -1,8 +1,11 @@
 # A small Whissle app
 
 Four agents, live voice calls with or without a face, and every past session with
-its transcript and score. About 300 lines, and the browser never holds a Whissle
-key.
+its transcript and score — and the browser never holds a Whissle key.
+
+It doubles as the **reference for everything `@whissle/agents` can do**: one page
+wiring every event the SDK emits, so "what does `tool-finished` look like" has an
+answer you can watch rather than read.
 
 ```bash
 npm install
@@ -12,6 +15,19 @@ npm start                              # http://localhost:4000
 
 No database, no build step, no framework. Open the page, pick an agent, allow the
 microphone.
+
+**Which SDK does it run?** The one next door. `server.mjs` serves this repo's
+`dist/` at `/sdk/index.js`, so `npm start` from inside the repo loads your working
+tree into a real browser — the only way to find out whether a change actually
+works before it is published. Copy this directory out on its own and there is no
+local build, so it falls back to the published package on esm.sh; both run, only
+the first proves anything.
+
+The page resolves the SDK with an **import map** rather than a bundler, which is
+also why a plain `<script src>` cannot work here: the SDK imports its dependency by
+bare name (`@pipecat-ai/client-js`), and a browser fetching the module raw throws
+"Failed to resolve module specifier" before a line of it runs. In an app with a
+build step none of this exists — `npm i @whissle/agents` and import it by name.
 
 Three views:
 
@@ -183,6 +199,102 @@ supervisor's dashboard.
 
 ---
 
+## When the interviewer goes quiet
+
+An agent that stops talking to look something up is the most alarming thing in a
+mock interview: the candidate assumes they broke it, and starts talking over the
+answer. Two things say otherwise, and both come free.
+
+```js
+agent.on("thinking", (s) => {
+  thinkingStrip.hidden = !s.active;
+  thinkingStrip.textContent = s.label ?? "Checking something…";
+});
+```
+
+`thinking` is already one edge each way however many tools the turn fired, so
+there is nothing to debounce. The audible half — a short cue per tool, chosen by
+the platform and played from whissle.ai's own mastered bank — the SDK plays for
+you; the **Tool sounds** checkbox is `agent.setEarconsMuted()`.
+
+And when you want the detail rather than the boolean, the same turn arrives as
+three events you can render — including what it answered *from*:
+
+```js
+agent
+  .on("tool-started",  (t) => row(t.id, t.name, t.arguments))
+  .on("tool-progress", (t) => progress(t.id, t.display))   // "Reading source 2 of 3…"
+  // `ok === undefined` means it timed out and whether it worked is genuinely
+  // unknown — which is not the same as failing.
+  .on("tool-finished", (t) => done(t.id, t.ok, t.evidence));
+```
+
+Correlate by `t.id` (the `tool_call_id`), never by name: two calls to the same
+tool can be in flight at once.
+
+---
+
+## The rest of what this page shows
+
+| what you see | the event behind it |
+|---|---|
+| the caption keeping time with the voice | `agent-word` — one word as the TTS says it |
+| the reply appearing sentence by sentence | `agent-partial` — the turn so far. `agent-transcript` only fires when the agent *stops*, so a long answer built from it alone sits empty and then dumps a paragraph |
+| the caption turning red | `listening-started` arriving *between* `speaking-started` and `speaking-stopped` — the candidate talked over the interviewer. That is the barge-in edge |
+| the one-line summary of what is being said | `gist`, on agents configured to emit one |
+| `sounds hesitant · 41%` | `user-metadata` — the live acoustic read |
+| the grey ticker of `endpoint`, `barge_in`, `flow_state` | `signal` — the pipeline's live prediction stream |
+| "Demo limit reached" | `demo-limit` — the anonymous cap, said out loud instead of the call just stopping |
+
+**On the acoustic read.** `emotion` is deliberately `undefined` whenever the
+platform said `NEUTRAL`, because the platform writes `NEUTRAL` both for a genuinely
+calm speaker and as the fallback when nothing was read at all — the wire is
+identical. Rendering it would turn "we don't know" into "they are calm". So it is
+shown as a leaning with its own probability, and never as a score. In an assessment
+product that distinction is not a nicety.
+
+---
+
+## Typing to the agent
+
+The composer under the transcript is one method with two behaviours, and the
+difference is the point:
+
+```js
+// with a call up: injected into the SAME conversation, answered OUT LOUD.
+// Resolves null — the reply arrives as speech, through agent-transcript.
+await agent.sendText("k.singla@example.com");
+
+// with no call: a text turn over HTTP, resolving with the reply and its receipts.
+// No microphone, no WebRTC.
+const turn = await agent.sendText("what's the marking scheme?");
+turn.reply; turn.toolsUsed; turn.evidence;
+```
+
+The first is the voice↔text handoff — spell an email rather than repeating it four
+times. The second is the visitor who refused the microphone, which is why this page
+leaves the composer working after `start()` fails.
+
+**Coming back later.** Persist `turn.threadId` and hand it to
+`agent.resumeTextThread(id)` on the next page load (this page uses
+`localStorage`). Use `threadId`, not `conversationId`: the latter is the gateway's
+conversation row id and resumes nothing, so handing back the wrong one is an agent
+that silently starts cold.
+
+---
+
+## The microphone
+
+**Test microphone** is `agent.checkMicrophone()` — worth calling *before* showing
+someone a Start button that needs it. It returns `null` when the microphone is
+fine, and otherwise a problem whose message names the fix rather than the fault.
+
+The picker below it is `listMicrophones()` + `setMicrophone()`. It stays hidden
+until the labels are real: before permission is granted a browser returns one
+unlabelled placeholder, so a picker drawn from it is a menu of nothing.
+
+---
+
 ## Making it yours
 
 1. **Replace `agents.json`.** An app for accountants, or for triage nurses, is
@@ -226,6 +338,8 @@ prompt and what your app shows cannot drift apart.
 | **`402`** | The workspace is out of credit. `whissle usage`. |
 | **`403 … missing required scope`** | Scopes are fixed when a key is created. Mint a new one. |
 | **Avatar never appears** | Needs `@whissle/agents` ≥ 0.3.1, and the container must exist *before* `start()`. |
+| **`Failed to resolve module specifier`** | The import map didn't load. It must come *before* the module script, and the page must be served over HTTP — opening `index.html` from the filesystem won't work. |
+| **The agent replies but there is no cue** | Tool sounds are unchecked, or the agent is set to `tool_sounds: "call"` (the cue is mixed into the audio server-side instead, and the SDK stays out of the way). |
 | **Microphone refused** | `localhost` is a secure context; a LAN IP is not. Serve over HTTPS to test from a phone. |
 
 Sessions are metered against the workspace behind your key.

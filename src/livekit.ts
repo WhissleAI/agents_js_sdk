@@ -32,7 +32,19 @@ export interface SessionCallbacks {
    * third copy of the same reply. See the handler below.
    */
   onBotLegacyOutput: (text: string) => void;
+  /**
+   * One word of the reply, at the moment the TTS speaks it (`bot-tts-text`).
+   *
+   * The finest granularity the pipeline offers, and the only one that can drive a
+   * caption that keeps time with the voice — `bot-output` is cut at sentences, which
+   * on a long reply means the screen sits still for several seconds and then jumps.
+   */
+  onBotWord: (word: string) => void;
   onUserTranscript: (text: string, final: boolean) => void;
+  /** The VAD heard the caller start. The barge-in edge: if the bot is speaking, this
+   *  is the moment it is being interrupted. */
+  onUserStartedSpeaking: () => void;
+  onUserStoppedSpeaking: () => void;
   onRemoteAudioTrack: (track: MediaStreamTrack) => void;
   onServerMessage: (data: unknown) => void;
   onError: (message: string) => void;
@@ -66,6 +78,30 @@ function loadLiveKit(): Promise<typeof import("livekit-client")> {
  * instead of a raw one. We translate those envelopes into the same callbacks
  * `PipecatClient` would have fired, so `WhissleAgent` cannot tell the difference.
  */
+/**
+ * Take a `server-message` payload out of pipecat's wrapper — and only out of it.
+ *
+ * Pipecat nests an application message one level deep, `{data: {…}}`, so the payload
+ * has to be lifted. Doing that on the mere PRESENCE of a `.data` key was wrong, and
+ * wrong in a way nothing could report: the live signal stream's envelope
+ * (`{kind:"signal", v:1, seq, t_ms, type, data:{…}}`) carries a `data` field of its
+ * own, so every signal was unwrapped a second time and delivered as its bare inner
+ * payload. Stripped of `kind` and `v`, `parseSignal()` correctly refused it, the
+ * `signal` event never fired, and an embedder on LiveKit — which is every production
+ * session — saw an empty stream while the pipeline was talking the whole time.
+ * `{kind:"tool", phase:"progress", data:{…}}` was losing its envelope the same way.
+ *
+ * So: unwrap only a bare wrapper — an object whose sole content is `data` and which
+ * carries none of the three discriminators the SDK routes on (`kind`, `t`, `type`).
+ */
+export function unwrapServerMessage(payload: unknown): unknown {
+  if (!payload || typeof payload !== "object") return payload;
+  const o = payload as Record<string, unknown>;
+  const wrapper =
+    "data" in o && o.kind === undefined && o.t === undefined && o.type === undefined;
+  return wrapper ? o.data : o;
+}
+
 export class LiveKitSession {
   private room: LiveKitRoom | null = null;
   private micEnabled = true;
@@ -78,6 +114,16 @@ export class LiveKitSession {
     room.on(RoomEvent.TrackSubscribed, (track: { kind: string; mediaStreamTrack: MediaStreamTrack }) => {
       if (track?.kind === "audio" && track.mediaStreamTrack) {
         cb.onRemoteAudioTrack(track.mediaStreamTrack);
+        // The other half of the greeting handshake. The bot holds its opening line
+        // until the browser says it is subscribed and playing, because audio sent
+        // before that goes into a track nobody is listening to and is simply gone —
+        // the intermittent "it connected and then said nothing" report.
+        //
+        // Without it the runner falls back to a 2.5 s timer (bot/runners.py
+        // "join-fallback"), which is both slower than it needs to be and still a
+        // guess: a join that takes longer than that loses the first words anyway.
+        // Our own dashboard has always sent this; an embed never did.
+        this.sendClientMessage("playback-ready");
       }
     });
     room.on(RoomEvent.DataReceived, (payload: Uint8Array) => {
@@ -107,6 +153,28 @@ export class LiveKitSession {
     }
   }
 
+  /**
+   * Send an application message to the running bot.
+   *
+   * The envelope is NOT negotiable and this SDK had it wrong: the bot reads
+   * `{type:"client-message", data:{t, d}}` and drops anything else on the floor
+   * (bot/runners.py `_on_data` — `if msg.get("type") != "client-message": return`).
+   * What went out instead was `{label:"rtvi-ai", type:<yourType>, data:<yourData>}`,
+   * which matches nothing, so on LiveKit — the transport every production session
+   * has been using — `agent.send(...)` was a silent no-op. Pausing an interview,
+   * telling it to wrap up, handing it typed text: all of it reached the room and
+   * none of it reached the agent, with no error anywhere to say so.
+   *
+   * `sendClientMessage` is exactly the shape `PipecatClient.sendClientMessage(t, d)`
+   * produces on the SmallWebRTC path, which is why that path always worked.
+   */
+  sendClientMessage(t: string, d?: unknown): void {
+    this.send({
+      type: RTVIMessageType.CLIENT_MESSAGE,
+      data: { t, ...(d !== undefined ? { d } : {}) },
+    });
+  }
+
   private handleData(payload: Uint8Array, cb: SessionCallbacks): void {
     let msg: { label?: string; type?: string; data?: unknown };
     try {
@@ -114,7 +182,25 @@ export class LiveKitSession {
     } catch {
       return; // not ours (or not JSON) — ignore rather than break the session
     }
-    if (!msg || (msg.label && msg.label !== RTVI_LABEL)) return;
+    if (!msg) return;
+    if (msg.label && msg.label !== RTVI_LABEL) return;
+    // Three messages travel WITHOUT the `rtvi-ai` label and with their fields at the
+    // top level rather than under `data`: `{type:"bot-ready"}`, the out-of-credit
+    // notice, and the demo cap. Two of the three END the session.
+    //
+    // They used to fall through into the switch below, where `"error"` collided with
+    // the RTVI error type and was read as `data.error` — undefined, because the real
+    // field is `msg.error`. So a caller who ran out of credit mid-sentence was told
+    // "Connection error.", and the demo cap was dropped entirely. Both are cases
+    // where the visitor can actually do something, and both looked like a bug in the
+    // embedder's page.
+    if (!msg.label) {
+      const raw = msg as Record<string, unknown>;
+      if (raw.type === "error" || raw.type === "demo-limit") {
+        cb.onServerMessage(raw);
+        return;
+      }
+    }
     const data = (msg.data ?? {}) as Record<string, unknown>;
     switch (msg.type) {
       case RTVIMessageType.BOT_READY:
@@ -138,12 +224,22 @@ export class LiveKitSession {
       case RTVIMessageType.BOT_TRANSCRIPTION:
         cb.onBotLegacyOutput(String(data.text ?? ""));
         break;
+      // One word, at the moment it is spoken. The only message fine-grained enough
+      // to caption a reply in time with the voice.
+      case RTVIMessageType.BOT_TTS_TEXT:
+        cb.onBotWord(String(data.text ?? ""));
+        break;
       case RTVIMessageType.USER_TRANSCRIPTION:
         cb.onUserTranscript(String(data.text ?? ""), Boolean(data.final));
         break;
+      case RTVIMessageType.USER_STARTED_SPEAKING:
+        cb.onUserStartedSpeaking();
+        break;
+      case RTVIMessageType.USER_STOPPED_SPEAKING:
+        cb.onUserStoppedSpeaking();
+        break;
       case RTVIMessageType.SERVER_MESSAGE:
-        // Pipecat nests the payload one level deep under `data.data`.
-        cb.onServerMessage((data as { data?: unknown }).data ?? data);
+        cb.onServerMessage(unwrapServerMessage(data));
         break;
       case RTVIMessageType.ERROR:
         cb.onError(String(data.error ?? data.message ?? "Connection error."));
@@ -165,6 +261,27 @@ export class LiveKitSession {
       if (t) return t;
     }
     return null;
+  }
+
+  /**
+   * Switch to another microphone mid-session.
+   *
+   * `switchActiveDevice` replaces the track on the SAME sender rather than acquiring a
+   * second one — the rule that matters here is never to hold two tracks on one input,
+   * because a parallel acquisition is how the device ends up locked and the session
+   * ends up deaf.
+   */
+  setMicrophone(deviceId: string): boolean {
+    const room = this.room as unknown as {
+      switchActiveDevice?: (kind: MediaDeviceKind, id: string) => Promise<void>;
+    } | null;
+    if (!room?.switchActiveDevice) return false;
+    try {
+      void room.switchActiveDevice("audioinput", deviceId);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   setMuted(muted: boolean): void {

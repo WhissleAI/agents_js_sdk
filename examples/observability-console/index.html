@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Whissle · Signal Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="/console.css" />
+</head>
+<body>
+<div class="shell">
+
+  <!-- ── top bar ───────────────────────────────────────────────────────── -->
+  <header class="top">
+    <div class="mark"><span class="dotmark"></span>Whissle <small>SIGNAL CONSOLE</small></div>
+
+    <div class="who">
+      <b id="agentName">connecting…</b>
+      <span id="agentMeta">—</span>
+    </div>
+
+    <div class="pill" id="modePill"><span class="dot"></span><b>IDLE</b></div>
+    <div class="pill" id="statePill"><span class="dot"></span><span id="stateText">not started</span></div>
+    <div class="pill" id="transportPill" hidden><span class="dot"></span><span id="transportText"></span></div>
+
+    <div class="spacer"></div>
+
+    <div class="clock" id="clock">00:00<span>.0</span></div>
+
+    <div class="toolbar">
+      <button class="btn primary" id="btnStart">Start session</button>
+      <button class="btn danger" id="btnStop" disabled>Stop</button>
+      <button class="btn small" id="btnMute" aria-pressed="false" disabled>Mic on</button>
+      <button class="btn small" id="btnCues" aria-pressed="true" disabled>Cues on</button>
+      <button class="btn small" id="btnExport" disabled>Export JSON</button>
+      <button class="btn small" id="btnSave" disabled>Save for replay</button>
+      <select class="btn small" id="replayPick" title="Replay a recorded session">
+        <option value="">Replay…</option>
+      </select>
+      <button class="btn small" id="btnReplay" disabled>Play</button>
+      <select class="btn small" id="speed" title="Replay speed" disabled>
+        <option value="0.5">0.5×</option>
+        <option value="1" selected>1×</option>
+        <option value="2">2×</option>
+      </select>
+    </div>
+  </header>
+
+  <!--
+    The input strip. It answers one question at a glance — "can it hear me?" — and it
+    is never allowed to be ambiguous: the source is named, the level comes off the very
+    track the session is publishing, and a synthetic source shouts about itself.
+  -->
+  <div class="micbar" id="micbar">
+    <span class="src" id="micSrc">MICROPHONE</span>
+    <select class="btn small" id="micPick" title="Input device" disabled>
+      <option value="">Default input</option>
+    </select>
+    <div class="meter" id="meter" title="Live level from the track this session is publishing">
+      <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+    </div>
+    <span class="micstate" id="micState">not started</span>
+    <span class="spacer"></span>
+    <span class="micwarn" id="micWarn" hidden></span>
+  </div>
+
+  <div class="rehearsal-banner" id="rehearsalBanner" hidden>
+    REHEARSAL — SYNTHETIC AUDIO, NOT A LIVE MIC
+  </div>
+
+  <!-- ── the board ─────────────────────────────────────────────────────── -->
+  <div class="board">
+
+    <div class="col">
+      <section class="panel you" style="flex: 1">
+        <header>
+          <h2>What you said</h2>
+          <span class="note" id="youNote"></span>
+        </header>
+        <div class="body" id="youBody">
+          <p class="empty">
+            Every provisional guess the recogniser makes appears here as it arrives, then the
+            final replaces it — with the words that <b>changed</b> marked. The churn is not noise;
+            it is the recogniser thinking out loud.
+          </p>
+        </div>
+      </section>
+
+      <section class="panel read" style="flex: 1.25">
+        <header>
+          <h2>Acoustic read</h2>
+          <span class="note" id="readNote">no frames yet</span>
+        </header>
+        <div class="body" id="readBody">
+          <div id="readLive"></div>
+          <div id="readHistory"></div>
+        </div>
+      </section>
+    </div>
+
+    <div class="col">
+      <section class="panel agent" style="flex: 1">
+        <header>
+          <h2>The agent</h2>
+          <span class="note" id="agentNote"></span>
+        </header>
+        <div class="body" id="agentBody">
+          <div class="agent-state" id="agentState"></div>
+          <div class="gist" id="gist" hidden></div>
+          <p class="caption" id="caption"></p>
+          <div id="replies">
+            <p class="empty">
+              The reply at three granularities: one <b>word</b> at a time as the voice says it,
+              the sentence-by-sentence <b>partial</b>, and the finished turn. Anything a tool
+              renders — an image, a clip — lands here too.
+            </p>
+          </div>
+          <div class="artifacts" id="artifacts"></div>
+        </div>
+      </section>
+
+      <section class="panel tools" style="flex: 1.1">
+        <header>
+          <h2>Tool calls</h2>
+          <span class="note" id="toolNote"></span>
+        </header>
+        <div class="body" id="toolBody">
+          <p class="empty">
+            Name, arguments, progress, result, citations, and the earcon that fired.
+            A tool that failed looks failed; one that timed out without saying reads
+            <b>unknown</b>, because that is what the wire said.
+          </p>
+        </div>
+      </section>
+    </div>
+
+    <div class="col">
+      <section class="panel pred" style="flex: 1.05">
+        <header>
+          <h2>Predictions</h2>
+          <span class="note" id="predNote"></span>
+        </header>
+        <div class="body" id="predBody">
+          <p class="empty">
+            Every bet the pipeline places mid-call — where the sentence ends, whether that noise
+            was an interruption, which tool to pre-warm — and how it turned out.
+            <b>An unresolved bet stays open</b>; no outcome is invented for it.
+          </p>
+        </div>
+      </section>
+
+      <section class="panel signal" style="flex: 1">
+        <header>
+          <h2>Signal stream</h2>
+          <span class="note" id="sigNote"></span>
+        </header>
+        <div class="body" id="sigBody">
+          <div class="roster" id="roster"></div>
+          <p class="empty" id="sigEmpty">
+            The pipeline's own subsystems narrating themselves: endpointing, barge-in,
+            language, entities, flow. The roster above comes from the stream's opening
+            frame — lanes it declares but never fills stay dim.
+          </p>
+          <div id="sigList"></div>
+        </div>
+      </section>
+    </div>
+
+    <!-- Everything on the wire, in order, nothing dropped. Click a row for the bytes. -->
+    <div class="col">
+      <section class="panel stream" style="flex: 1">
+        <header>
+          <h2>Event stream</h2>
+          <label class="mini"><input type="checkbox" id="showWords" /> words</label>
+          <span class="note" id="streamNote">0</span>
+        </header>
+        <div class="body" id="streamBody">
+          <p class="empty">
+            Every event this page receives, with its offset from the session start.
+            Click any row for the exact JSON that came off the wire — including the
+            frames the SDK has no type for, which render as <b>unmodelled</b> rather
+            than being dropped.
+          </p>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- ── timeline ──────────────────────────────────────────────────────── -->
+  <section class="panel time">
+    <header>
+      <h2>Timeline</h2>
+      <div class="legend">
+        <span><i style="background:#6fa3db"></i>you</span>
+        <span><i style="background:#efc463"></i>prediction</span>
+        <span><i style="background:#adafb4"></i>thinking</span>
+        <span><i style="background:#45bec5"></i>tool</span>
+        <span><i style="background:#4fb89e"></i>agent</span>
+        <span><i style="background:#c088a6"></i>signal</span>
+        <span><i style="background:#f14e52"></i>barge-in</span>
+      </div>
+      <span class="note" id="timeNote">client clock · ms since the session opened</span>
+    </header>
+    <div class="body">
+      <canvas id="tl"></canvas>
+      <div class="stats" id="stats"></div>
+    </div>
+  </section>
+
+  <div class="foot">
+    <span id="footNote"><b>Every number on this page is measured in this browser.</b> Latencies include network and playout queue — they are not server compute time.</span>
+    <span class="spacer"></span>
+    <span id="footErr" class="err"></span>
+  </div>
+</div>
+
+<!--
+  No build step, so the browser resolves the SDK itself with an import map.
+  `/sdk/index.js` is served by server.mjs from the dist/ next door, which is the
+  point: this console exercises THIS checkout in a real browser. The other three
+  entries are the SDK's own bare-name imports, which a bundler would resolve and
+  a browser will not.
+-->
+<script type="importmap">
+{
+  "imports": {
+    "@whissle/agents": "/sdk/index.js",
+    "@pipecat-ai/client-js": "https://esm.sh/@pipecat-ai/client-js@1.9.1",
+    "livekit-client": "https://esm.sh/livekit-client@2.21.0",
+    "simli-client/dist/client.js": "https://esm.sh/simli-client@3.0.2"
+  }
+}
+</script>
+<script type="module" src="/console.js"></script>
+</body>
+</html>

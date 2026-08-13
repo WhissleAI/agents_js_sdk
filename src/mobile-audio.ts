@@ -30,16 +30,12 @@
 // WebAudio path fails, we fall back to the plain element. A kill switch
 // (`window.__whissleNoAudioBoost = true`, or `?audioboost=0`) disables it live.
 
-let ctx: AudioContext | null = null;
-let source: MediaStreamAudioSourceNode | null = null;
-let analyser: AnalyserNode | null = null;
-let currentStream: MediaStream | null = null;
-// The last stream/element we were asked to boost. Kept so the graph can be wired
-// LATER — when the context finally reaches "running" — instead of only at the
-// instant the bot's track arrives. See `onCtxStateChange`.
-let wantedStream: MediaStream | null = null;
-let wantedEl: HTMLAudioElement | null = null;
-let listenersBound = false;
+// State lives on the INSTANCE, not this module. It used to live here, which meant
+// two agents on one page — a support widget and a demo, a page that opens a second
+// session before the first is fully torn down — shared one graph, one context and
+// one pair of `wanted*` slots. The visible failure is the tidy one: `teardown()`
+// was global, so stopping either agent closed the context the other was playing
+// through and muted a live call. See `BoostedPlayout` below.
 
 /**
  * The graph, measured rather than guessed. Numbers are from an OfflineAudioContext
@@ -128,221 +124,246 @@ function AudioCtor(): typeof AudioContext | undefined {
 }
 
 /**
- * The context is the one piece of state that has to be right, and the browser can
- * take it away at any moment: an AudioContext created before a user gesture starts
- * `suspended`, and a phone that backgrounds the tab, rings, or plugs in headphones
- * suspends a running one mid-call.
+ * One boosted playout path, owned by one session.
  *
- * So the rule this enforces is: *the element is muted only while the graph is
- * actually running*. Anything else — suspended, closed, interrupted — and the
- * element goes back to being the audible sink. Quiet is a bug; silent is a much
- * worse one, and muting the element on a context that never started was the way to
- * get there.
+ * Everything below used to be module state. The instance is the fix for a real
+ * multi-agent failure — see the note at the top — and costs nothing for the single
+ * agent case, which is every page that had it right by accident before.
  */
-function onCtxStateChange(): void {
-  if (!ctx) return;
-  if (ctx.state === "running") {
-    // Late arrival: wire (or re-wire) whatever we were last asked to boost.
-    if (wantedStream) wire(wantedStream, wantedEl);
-    return;
-  }
-  // Not running → the graph is producing nothing. Hand the audio back.
-  if (wantedEl) wantedEl.muted = false;
-  void ctx.resume().catch(() => {});
-}
+export class BoostedPlayout {
+  private ctx: AudioContext | null = null;
+  private source: MediaStreamAudioSourceNode | null = null;
+  private analyser: AnalyserNode | null = null;
+  private currentStream: MediaStream | null = null;
+  /** The last stream/element we were asked to boost. Kept so the graph can be wired
+   *  LATER — when the context finally reaches "running" — instead of only at the
+   *  instant the bot's track arrives. See `onCtxStateChange`. */
+  private wantedStream: MediaStream | null = null;
+  private wantedEl: HTMLAudioElement | null = null;
+  private listenersBound = false;
+  /** Bound once so add/removeEventListener see the same reference — an arrow field
+   *  re-created per call would leave a listener behind on every teardown. */
+  private readonly onResume = () => this.resume();
 
-function ensureCtx(): AudioContext | null {
-  if (ctx) return ctx;
-  const AC = AudioCtor();
-  if (!AC) return null;
-  try {
-    ctx = new AC();
-    ctx.onstatechange = onCtxStateChange;
-    void ctx.resume().catch(() => {});
-    bindResumeListeners();
-    return ctx;
-  } catch {
-    ctx = null;
-    return null;
-  }
-}
-
-/**
- * A suspended context must not stay suspended for the rest of the call.
- *
- * Two ways back: the tab becoming visible again (the backgrounding case), and the
- * visitor's next touch anywhere on the page (the case where the context was created
- * without an activation to spend). Both are cheap, passive, and idempotent — and
- * both fix a session that is *already* live, which is the point: the boost repairs
- * itself instead of being decided once, at the worst possible moment, and lost.
- */
-function bindResumeListeners(): void {
-  if (listenersBound || typeof document === "undefined") return;
-  listenersBound = true;
-  document.addEventListener("visibilitychange", resumeBoostedPlayout);
-  for (const ev of ["pointerdown", "touchend", "keydown"] as const) {
-    document.addEventListener(ev, resumeBoostedPlayout, { passive: true, capture: true });
-  }
-}
-
-function unbindResumeListeners(): void {
-  if (!listenersBound || typeof document === "undefined") return;
-  listenersBound = false;
-  document.removeEventListener("visibilitychange", resumeBoostedPlayout);
-  for (const ev of ["pointerdown", "touchend", "keydown"] as const) {
-    document.removeEventListener(ev, resumeBoostedPlayout, { capture: true });
-  }
-}
-
-/** Build the graph for `stream` and mute `el`. Caller has checked the context runs. */
-function wire(stream: MediaStream, el: HTMLAudioElement | null): boolean {
-  if (!ctx) return false;
-  try {
-    if (source && currentStream === stream) {
-      if (el) el.muted = true;
-      return true; // already wired for this stream
+  /**
+   * The context is the one piece of state that has to be right, and the browser can
+   * take it away at any moment: an AudioContext created before a user gesture starts
+   * `suspended`, and a phone that backgrounds the tab, rings, or plugs in headphones
+   * suspends a running one mid-call.
+   *
+   * So the rule this enforces is: *the element is muted only while the graph is
+   * actually running*. Anything else — suspended, closed, interrupted — and the
+   * element goes back to being the audible sink. Quiet is a bug; silent is a much
+   * worse one, and muting the element on a context that never started was the way to
+   * get there.
+   */
+  private onCtxStateChange(): void {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    if (ctx.state === "running") {
+      // Late arrival: wire (or re-wire) whatever we were last asked to boost.
+      if (this.wantedStream) this.wire(this.wantedStream, this.wantedEl);
+      return;
     }
-    if (source) {
+    // Not running → the graph is producing nothing. Hand the audio back.
+    if (this.wantedEl) this.wantedEl.muted = false;
+    void ctx.resume().catch(() => {});
+  }
+
+  private ensureCtx(): AudioContext | null {
+    if (this.ctx) return this.ctx;
+    const AC = AudioCtor();
+    if (!AC) return null;
+    try {
+      const ctx = new AC();
+      this.ctx = ctx;
+      ctx.onstatechange = () => this.onCtxStateChange();
+      void ctx.resume().catch(() => {});
+      this.bindResumeListeners();
+      return ctx;
+    } catch {
+      this.ctx = null;
+      return null;
+    }
+  }
+
+  /**
+   * A suspended context must not stay suspended for the rest of the call.
+   *
+   * Two ways back: the tab becoming visible again (the backgrounding case), and the
+   * visitor's next touch anywhere on the page (the case where the context was created
+   * without an activation to spend). Both are cheap, passive, and idempotent — and
+   * both fix a session that is *already* live, which is the point: the boost repairs
+   * itself instead of being decided once, at the worst possible moment, and lost.
+   */
+  private bindResumeListeners(): void {
+    if (this.listenersBound || typeof document === "undefined") return;
+    this.listenersBound = true;
+    document.addEventListener("visibilitychange", this.onResume);
+    for (const ev of ["pointerdown", "touchend", "keydown"] as const) {
+      document.addEventListener(ev, this.onResume, { passive: true, capture: true });
+    }
+  }
+
+  private unbindResumeListeners(): void {
+    if (!this.listenersBound || typeof document === "undefined") return;
+    this.listenersBound = false;
+    document.removeEventListener("visibilitychange", this.onResume);
+    for (const ev of ["pointerdown", "touchend", "keydown"] as const) {
+      document.removeEventListener(ev, this.onResume, { capture: true });
+    }
+  }
+
+  /** Build the graph for `stream` and mute `el`. Caller has checked the context runs. */
+  private wire(stream: MediaStream, el: HTMLAudioElement | null): boolean {
+    const ctx = this.ctx;
+    if (!ctx) return false;
+    try {
+      if (this.source && this.currentStream === stream) {
+        if (el) el.muted = true;
+        return true; // already wired for this stream
+      }
+      if (this.source) {
+        try {
+          this.source.disconnect();
+        } catch {
+          /* ignore */
+        }
+        this.source = null;
+      }
+      const source = ctx.createMediaStreamSource(stream);
+      this.source = source;
+      const compressor = ctx.createDynamicsCompressor();
+      compressor.threshold.value = COMPRESSOR.threshold;
+      compressor.knee.value = COMPRESSOR.knee;
+      compressor.ratio.value = COMPRESSOR.ratio;
+      compressor.attack.value = COMPRESSOR.attack;
+      compressor.release.value = COMPRESSOR.release;
+      const gain = ctx.createGain();
+      gain.gain.value = MOBILE_GAIN;
+      const limiter = ctx.createDynamicsCompressor();
+      limiter.threshold.value = LIMITER.threshold;
+      limiter.knee.value = LIMITER.knee;
+      limiter.ratio.value = LIMITER.ratio;
+      limiter.attack.value = LIMITER.attack;
+      limiter.release.value = LIMITER.release;
+      // A tap, not a stage — an AnalyserNode has no effect on what it observes, and
+      // this one is never connected onward. It is how `diagnostics()` can report
+      // the real output level from a real phone instead of us inferring it.
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 2048;
+      this.analyser = analyser;
+
+      source.connect(compressor);
+      compressor.connect(gain);
+      gain.connect(limiter);
+      limiter.connect(ctx.destination);
+      limiter.connect(analyser);
+
+      this.currentStream = stream;
+      if (el) el.muted = true; // WebAudio drives output now; avoid double playback
+      return true;
+    } catch (err) {
+      console.warn("[mobile-audio] boosted playout unavailable, using element:", err);
+      if (el) el.muted = false;
+      this.currentStream = null;
+      this.source = null;
+      this.analyser = null;
+      return false;
+    }
+  }
+
+  /** Create + resume the playback AudioContext from inside the connect user gesture.
+   *  Starting it on the gesture means it is already running by the time the bot's
+   *  first words arrive, rather than racing them. No-op on desktop / when disabled. */
+  prime(): void {
+    if (!isMobileBrowser() || boostDisabled()) return;
+    // Readable from a phone over remote devtools — the only way to check the graph
+    // on the hardware that has the problem.
+    (window as unknown as { __whissleAudioBoost?: unknown }).__whissleAudioBoost = () =>
+      this.diagnostics();
+    this.ensureCtx();
+  }
+
+  /** Route `stream` through the boosted graph to the speakers and mute the fallback
+   *  `<audio>` element. Returns true when the boosted path is driving audio (element
+   *  muted); false means the element is playing it, at normal volume.
+   *
+   *  A false here is not final. The stream and element are remembered, so if the
+   *  context is still starting — or is suspended, or gets suspended later — the graph
+   *  is wired the moment it runs, without needing another track event.
+   *
+   *  Safe to call repeatedly (e.g. on element remount) — it rewires only when the
+   *  stream changes and no-ops otherwise. */
+  attach(stream: MediaStream, el: HTMLAudioElement | null): boolean {
+    if (!isMobileBrowser() || boostDisabled()) return false;
+    this.wantedStream = stream;
+    this.wantedEl = el;
+    const c = this.ensureCtx();
+    if (!c) return false;
+    if (c.state !== "running") {
+      // Keep the element audible meanwhile — quiet beats silent — and let
+      // `onCtxStateChange` upgrade to the boosted path as soon as it can.
+      if (el) el.muted = false;
+      void c.resume().catch(() => {});
+      return false;
+    }
+    return this.wire(stream, el);
+  }
+
+  /** Resume the context after a backgrounding / interruption. Bound to visibility and
+   *  the next gesture automatically; exported for callers that know of another moment
+   *  worth retrying on. No-op on desktop. */
+  resume(): void {
+    if (this.ctx && this.ctx.state === "suspended") void this.ctx.resume().catch(() => {});
+  }
+
+  /** What the boost is actually doing, from the device it is doing it on.
+   *  `rmsDb` is measured off a tap on the graph's output — the number to read when
+   *  checking a real phone rather than trusting the graph on paper. */
+  diagnostics(): {
+    active: boolean;
+    state: AudioContextState | "none";
+    gain: number;
+    rmsDb: number | null;
+  } {
+    const active = !!(this.ctx && this.ctx.state === "running" && this.source);
+    let rmsDb: number | null = null;
+    if (this.analyser) {
+      const buf = new Float32Array(this.analyser.fftSize);
+      this.analyser.getFloatTimeDomainData(buf);
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+      const rms = Math.sqrt(sum / buf.length);
+      rmsDb = rms <= 1e-9 ? -Infinity : 20 * Math.log10(rms);
+    }
+    return { active, state: this.ctx ? this.ctx.state : "none", gain: MOBILE_GAIN, rmsDb };
+  }
+
+  /** Tear THIS session's graph down at disconnect so a stale source can't linger. */
+  teardown(): void {
+    if (this.source) {
       try {
-        source.disconnect();
+        this.source.disconnect();
       } catch {
         /* ignore */
       }
-      source = null;
     }
-    source = ctx.createMediaStreamSource(stream);
-    const compressor = ctx.createDynamicsCompressor();
-    compressor.threshold.value = COMPRESSOR.threshold;
-    compressor.knee.value = COMPRESSOR.knee;
-    compressor.ratio.value = COMPRESSOR.ratio;
-    compressor.attack.value = COMPRESSOR.attack;
-    compressor.release.value = COMPRESSOR.release;
-    const gain = ctx.createGain();
-    gain.gain.value = MOBILE_GAIN;
-    const limiter = ctx.createDynamicsCompressor();
-    limiter.threshold.value = LIMITER.threshold;
-    limiter.knee.value = LIMITER.knee;
-    limiter.ratio.value = LIMITER.ratio;
-    limiter.attack.value = LIMITER.attack;
-    limiter.release.value = LIMITER.release;
-    // A tap, not a stage — an AnalyserNode has no effect on what it observes, and
-    // this one is never connected onward. It is how `boostDiagnostics()` can report
-    // the real output level from a real phone instead of us inferring it.
-    analyser = ctx.createAnalyser();
-    analyser.fftSize = 2048;
-
-    source.connect(compressor);
-    compressor.connect(gain);
-    gain.connect(limiter);
-    limiter.connect(ctx.destination);
-    limiter.connect(analyser);
-
-    currentStream = stream;
-    if (el) el.muted = true; // WebAudio drives output now; avoid double playback
-    return true;
-  } catch (err) {
-    console.warn("[mobile-audio] boosted playout unavailable, using element:", err);
-    if (el) el.muted = false;
-    currentStream = null;
-    source = null;
-    analyser = null;
-    return false;
-  }
-}
-
-/** Create + resume the playback AudioContext from inside the connect user gesture.
- *  Starting it on the gesture means it is already running by the time the bot's
- *  first words arrive, rather than racing them. No-op on desktop / when disabled. */
-export function primeBoostedPlayout(): void {
-  if (!isMobileBrowser() || boostDisabled()) return;
-  // Readable from a phone over remote devtools — the only way to check the graph
-  // on the hardware that has the problem.
-  (window as unknown as { __whissleAudioBoost?: unknown }).__whissleAudioBoost =
-    boostDiagnostics;
-  ensureCtx();
-}
-
-/** Route `stream` through the boosted graph to the speakers and mute the fallback
- *  `<audio>` element. Returns true when the boosted path is driving audio (element
- *  muted); false means the element is playing it, at normal volume.
- *
- *  A false here is not final. The stream and element are remembered, so if the
- *  context is still starting — or is suspended, or gets suspended later — the graph
- *  is wired the moment it runs, without needing another track event.
- *
- *  Safe to call repeatedly (e.g. on element remount) — it rewires only when the
- *  stream changes and no-ops otherwise. */
-export function attachBoostedPlayout(
-  stream: MediaStream,
-  el: HTMLAudioElement | null,
-): boolean {
-  if (!isMobileBrowser() || boostDisabled()) return false;
-  wantedStream = stream;
-  wantedEl = el;
-  const c = ensureCtx();
-  if (!c) return false;
-  if (c.state !== "running") {
-    // Keep the element audible meanwhile — quiet beats silent — and let
-    // `onCtxStateChange` upgrade to the boosted path as soon as it can.
-    if (el) el.muted = false;
-    void c.resume().catch(() => {});
-    return false;
-  }
-  return wire(stream, el);
-}
-
-/** Resume the context after a backgrounding / interruption. Bound to visibility and
- *  the next gesture automatically; exported for callers that know of another moment
- *  worth retrying on. No-op on desktop. */
-export function resumeBoostedPlayout(): void {
-  if (ctx && ctx.state === "suspended") void ctx.resume().catch(() => {});
-}
-
-/** What the boost is actually doing, from the device it is doing it on.
- *  `rmsDb` is measured off a tap on the graph's output — the number to read when
- *  checking a real phone rather than trusting the graph on paper. */
-export function boostDiagnostics(): {
-  active: boolean;
-  state: AudioContextState | "none";
-  gain: number;
-  rmsDb: number | null;
-} {
-  const active = !!(ctx && ctx.state === "running" && source);
-  let rmsDb: number | null = null;
-  if (analyser) {
-    const buf = new Float32Array(analyser.fftSize);
-    analyser.getFloatTimeDomainData(buf);
-    let sum = 0;
-    for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
-    const rms = Math.sqrt(sum / buf.length);
-    rmsDb = rms <= 1e-9 ? -Infinity : 20 * Math.log10(rms);
-  }
-  return { active, state: ctx ? ctx.state : "none", gain: MOBILE_GAIN, rmsDb };
-}
-
-/** Tear the graph down at disconnect so a stale source can't linger. */
-export function teardownBoostedPlayout(): void {
-  if (source) {
-    try {
-      source.disconnect();
-    } catch {
-      /* ignore */
+    // Give the element its voice back on the way out. The graph is what muted it,
+    // and once the graph is gone a still-muted element is a silent next session —
+    // which is exactly what happens if the boost is disabled (kill switch, a
+    // desktop reload) between one call and the next.
+    if (this.wantedEl) this.wantedEl.muted = false;
+    this.source = null;
+    this.analyser = null;
+    this.currentStream = null;
+    this.wantedStream = null;
+    this.wantedEl = null;
+    this.unbindResumeListeners();
+    if (this.ctx) {
+      this.ctx.onstatechange = null;
+      void this.ctx.close().catch(() => {});
+      this.ctx = null;
     }
-  }
-  // Give the element its voice back on the way out. The graph is what muted it,
-  // and once the graph is gone a still-muted element is a silent next session —
-  // which is exactly what happens if the boost is disabled (kill switch, a
-  // desktop reload) between one call and the next.
-  if (wantedEl) wantedEl.muted = false;
-  source = null;
-  analyser = null;
-  currentStream = null;
-  wantedStream = null;
-  wantedEl = null;
-  unbindResumeListeners();
-  if (ctx) {
-    ctx.onstatechange = null;
-    void ctx.close().catch(() => {});
-    ctx = null;
   }
 }

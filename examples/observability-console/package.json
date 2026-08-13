@@ -1,0 +1,11 @@
+{
+  "name": "whissle-signal-console",
+  "private": true,
+  "type": "module",
+  "description": "A live observability console for a Whissle voice agent — interims resolving, predictions, tool calls, a real time axis, and deterministic replay.",
+  "scripts": {
+    "start": "node server.mjs",
+    "rehearsal": "node scripts/make-rehearsal.mjs"
+  },
+  "engines": { "node": ">=20" }
+}
