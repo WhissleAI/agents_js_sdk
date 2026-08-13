@@ -141,7 +141,13 @@ button, input, select { font: inherit; color: inherit; }
   letter-spacing: 0.02em;
 }
 
-.who { display: flex; flex-direction: column; gap: 2px; min-width: 0; max-width: 26ch; }
+.who {
+  display: flex; flex-direction: column; gap: 2px;
+  /* Fixed, not flexible. As a flex item it collapsed to "L…" the moment the replay
+     picker grew to fit a long filename — the agent's name is not the thing that
+     should give way. */
+  flex: none; width: 25ch; min-width: 0;
+}
 .who b { font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .who span {
   font-size: 11.5px; color: var(--faint); font-family: var(--mono);
@@ -211,6 +217,8 @@ button, input, select { font: inherit; color: inherit; }
 .btn[aria-pressed="true"] { background: rgb(79 184 158 / 0.16); border-color: var(--green-deep); color: var(--ink); }
 
 .toolbar { display: flex; align-items: center; gap: 8px; }
+/* A <select> sizes to its widest option; recordings have long names. */
+#replayPick { max-width: 190px; }
 
 /* ── panels ─────────────────────────────────────────────────────────────── */
 
