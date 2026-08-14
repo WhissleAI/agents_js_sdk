@@ -381,7 +381,8 @@ export interface AvatarReady {
  *   agent.stop();
  *
  * Framework-agnostic: emits plain events you can wire into React/Vue/vanilla, or
- * use WhissleAgent.mount() for a ready-made widget.
+ * import the top-level `mount()` for a ready-made widget (`WhissleAgents.mount()`
+ * from a plain `<script>` tag). There is no `WhissleAgent.mount` static.
  */
 export class WhissleAgent {
   private opts: Required<Pick<WhissleAgentOptions, "baseUrl" | "iceServers">> &

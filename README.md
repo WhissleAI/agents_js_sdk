@@ -9,6 +9,29 @@ Sessions run on Whissle's realtime infrastructure and are metered against your
 workspace. A publishable key is safe to ship in client code: it's restricted to
 the origins you allow and only authorizes a session with the agent you chose.
 
+## Which Whissle package do I want?
+
+We publish three, they are routinely confused, and the difference is which key
+they hold — which is a security boundary, not a preference.
+
+| Package | Runs in | Key | What it's for |
+| --- | --- | --- | --- |
+| **`@whissle/agents`** (this one) | the **browser** | `wpk_` **publishable** | Embed a live voice or text agent in a page |
+| [`@whissle/sdk`](https://www.npmjs.com/package/@whissle/sdk) | **server-side Node** | `wsk_` **workspace secret** | Configure agents; read back calls, sessions, traces and usage |
+| [`@whissle/cli`](https://www.npmjs.com/package/@whissle/cli) | your **terminal** | `wsk_` **workspace secret** | The control plane over the same API |
+
+**`@whissle/sdk` must never appear in client code.** A `wsk_` key carries full
+workspace authority — it can dial phone numbers, buy numbers, read every
+transcript — and anything shipped to a browser is public. This package refuses
+one: passing a `wsk_` as `apiKey` throws at construction. What belongs in a page
+is a `wpk_` publishable key or, better, a short-lived token your server mints
+(see [Keeping credentials off the page](#keeping-credentials-off-the-page)).
+
+There is also a **Python client** for the server-side API, in the Whissle
+monorepo at `SDKs/whissle-python` (imports as `whissle_sdk`, takes the same
+`wsk_` secret). It is aimed at eval harnesses and notebooks, and is not on PyPI
+yet.
+
 ## The flow
 
 1. **Create or configure an agent** on whissle.ai (e.g. an AI Tutor,
@@ -17,22 +40,32 @@ the origins you allow and only authorizes a session with the agent you chose.
    to use it, and copy your **publishable key**.
 3. Drop the SDK into your site.
 
-## A complete example
+## Two complete examples
 
-[`examples/interview-platform`](examples/interview-platform) is a small but
-complete app: agents declared in a JSON file, live calls with or without a face,
-and every past session with its transcript and score. No database, no build step —
-`npm install && npm start`.
+Everything in this README that a Node test suite cannot verify — the WebRTC
+handshake, the LiveKit join, the avatar's frames, autoplay, how the cues sound —
+can only be confirmed by running it in a browser. These two exist to make that a
+one-command job. Both serve the SDK build sitting next to them when run from
+inside this repo, so they exercise **your** working tree rather than whatever npm
+last published.
 
-It also exercises the whole 0.5.0 surface in one page, which is the other reason it
-exists: the live caption from `agent-word`, the reply-so-far from `agent-partial`,
-tool activity with its citations, the barge-in edge, the acoustic read, the live
-signal ticker, typing to the agent with and without a call up, a microphone picker,
-and the tool-cue toggle. Running it is the fastest way to see any of them behave.
+[**`examples/interview-platform`**](https://github.com/WhissleAI/agents_js_sdk/tree/main/examples/interview-platform)
+— a small but complete app: agents declared in a JSON file, live calls with or
+without a face, and every past session with its transcript and score. No
+database, no build step — `npm install && npm start`. It also exercises the whole
+0.5.0 surface in one page: the live caption from `agent-word`, the reply-so-far
+from `agent-partial`, tool activity with its citations, the barge-in edge, the
+acoustic read, the live signal ticker, typing to the agent with and without a
+call up, a microphone picker, and the tool-cue toggle.
 
-When run from inside this repo it serves the SDK build sitting next to it, so it
-tests **your** working tree in a real browser rather than whatever npm last
-published.
+[**`examples/observability-console`**](https://github.com/WhissleAI/agents_js_sdk/tree/main/examples/observability-console)
+— one screen showing everything the pipeline knows *while the conversation is
+happening*: the recogniser's provisional guesses before it commits, the acoustic
+read as a distribution rather than a label, every turn-taking bet and whether it
+held, each tool with its arguments and result, and per-hop latency. It can also
+replay a recorded session deterministically, which is the only way to look at a
+race twice. It needs a **secret** key server-side (the browser still only gets a
+session token).
 
 ## Install
 
@@ -45,6 +78,10 @@ npm install @whissle/agents
 ```html
 <script src="https://unpkg.com/@whissle/agents"></script>
 ```
+
+ESM and CJS, with types. Node 20+ to build with — the runtime target is the
+browser, and importing the package on a server is safe (see
+[Node ESM and SSR](#node-esm-and-ssr)), but a session needs a browser to run.
 
 ## Ready-made widget (one line)
 
@@ -74,24 +111,38 @@ whatever the agent says.
 ## A talking avatar
 
 ```ts
+import { WhissleAgent, type AvatarReady } from "@whissle/agents";
+
 const agent = new WhissleAgent({
   apiKey: "wpk_…",
   agentId: "…",
   avatar: "F1-HR",              // a code from GET /api/avatars
 });
-agent.on("avatar-ready", ({ video }) => document.querySelector("#face").append(video));
+agent.on("avatar-ready", (ready) => {
+  const { video } = ready as AvatarReady;
+  document.querySelector("#face")?.append(video);
+});
 await agent.start();
 ```
+
+(The cast is not decoration — see [Typing an event
+payload](#typing-an-event-payload).)
 
 …or let the widget place it for you:
 
 ```ts
-WhissleAgents.mount("#assistant", { apiKey: "wpk_…", agentId: "…", avatar: "F1-HR" });
+import { mount } from "@whissle/agents";
+
+mount("#assistant", { apiKey: "wpk_…", agentId: "…", avatar: "F1-HR" });
 ```
+
+From a plain `<script>` tag the same function is `WhissleAgents.mount(…)`.
 
 Three shapes are accepted:
 
 ```ts
+import { WhissleAgent } from "@whissle/agents";
+
 new WhissleAgent({ apiKey, agentId, avatar: "F1-HR" });   // a specific face
 new WhissleAgent({ apiKey, agentId, avatar: true });      // whatever the agent is configured with
 new WhissleAgent({
@@ -141,7 +192,11 @@ somewhere on screen to live.
 ## Headless — wire it into your own UI
 
 ```ts
-import { WhissleAgent } from "@whissle/agents";
+import {
+  WhissleAgent,
+  type ThinkingState,
+  type WhissleErrorDetail,
+} from "@whissle/agents";
 
 const agent = new WhissleAgent({
   apiKey: "wpk_your_publishable_key",
@@ -151,12 +206,15 @@ const agent = new WhissleAgent({
 agent
   .on("connected", () => console.log("live"))
   .on("user-transcript", (t) => console.log("you:", t))
-  .on("agent-partial", (t) => render(t))              // the reply as it happens
+  .on("agent-partial", (t) => render(String(t)))      // the reply as it happens
   .on("agent-transcript", (t) => console.log("agent:", t))
   // Why it just went quiet. Without this a tool call is several seconds of
   // nothing, which every visitor reads as a hang.
-  .on("thinking", (s) => strip.toggle(s.active, s.label))
-  .on("error", (m, detail) => console.error(detail?.code, m));
+  .on("thinking", (s) => {
+    const { active, label } = s as ThinkingState;
+    strip.toggle(active, label);
+  })
+  .on("error", (m, detail) => console.error((detail as WhissleErrorDetail)?.code, m));
 
 await agent.start();   // asks for the mic, checks it, connects
 // agent.setMuted(true);
@@ -164,6 +222,31 @@ await agent.start();   // asks for the mic, checks it, connects
 // await agent.sendText("or just type");
 // agent.stop();
 ```
+
+### Typing an event payload
+
+`on()` is one signature for 26 events, so **TypeScript hands every payload to
+your handler as `unknown`** — `(payload?: unknown, detail?: unknown) => void`.
+The Payload column in [Events](#events) is what arrives at *runtime*, and it is
+accurate; it is not what the compiler infers. Cast at the handler boundary, using
+the exported type for that event:
+
+```ts
+import type { ToolFinished, UserMetadata } from "@whissle/agents";
+
+agent.on("tool-finished", (payload) => {
+  const tool = payload as ToolFinished;
+  if (tool.ok === false) showRetry(tool.name);
+});
+
+agent.on("user-metadata", (payload) => {
+  const meta = payload as UserMetadata;
+  if (meta.emotion) showLeaning(meta.emotion.label, meta.emotion.confidence);
+});
+```
+
+Plain JavaScript is unaffected. Every payload type named in the table is exported
+from the package root, so the cast never means inventing a shape by hand.
 
 ## Keeping credentials off the page
 
@@ -182,12 +265,14 @@ const { token } = await r.json();     // hand `token` to the browser
 
 ```ts
 // the browser — no Whissle credential of any kind
+import { WhissleAgent } from "@whissle/agents";
+
 new WhissleAgent({ sessionToken: token });
 
 // or re-fetch on every start(), so a reconnect gets a fresh token:
 new WhissleAgent({
   getToken: () => fetch("/api/voice-token", { credentials: "include" })
-    .then((r) => r.json()).then((d) => d.token),
+    .then((r) => r.json()).then((d) => d.token as string),
 });
 ```
 
@@ -204,9 +289,11 @@ back to SmallWebRTC — which is what every 0.1.x session used, so existing code
 unaffected.
 
 ```ts
-transport: "auto"      // default — follow the mint, else SmallWebRTC
-transport: "webrtc"    // always SmallWebRTC
-transport: "livekit"   // always LiveKit (POST /api/embed/livekit)
+import { WhissleAgent } from "@whissle/agents";
+
+new WhissleAgent({ apiKey, agentId, transport: "auto" });     // default — follow the mint, else SmallWebRTC
+new WhissleAgent({ apiKey, agentId, transport: "webrtc" });   // always SmallWebRTC
+new WhissleAgent({ apiKey, agentId, transport: "livekit" });  // always LiveKit (POST /api/embed/livekit)
 ```
 
 With LiveKit the client SDK owns ICE, TURN, reconnection and track subscription,
@@ -214,6 +301,13 @@ so you stop hand-rolling peer connections and inventing ICE config. `"auto"`
 deliberately never *probes* for LiveKit: a probe would spend the session token's
 single-use nonce and start a metered bot. Forcing `"livekit"` against a gateway
 that doesn't have it enabled fails loudly rather than silently downgrading.
+
+**The fallback is exactly one hop, and only under `"auto"`.** If the mint's
+transport fails to come up, the SDK tries the first entry in that same mint's
+`fallbacks` list whose kind differs from the one that just failed — and if that
+fails too, it gives up. There is no retry loop, because a retry loop is a good
+way to bill someone twice for a call they never had. Naming a transport
+explicitly disables the hop entirely.
 
 > **Partly untested in a browser.** The suite covers which transport is chosen,
 > what is asked for, and the fallback — all the decisions made before media flows.
@@ -240,8 +334,23 @@ The voice basics:
 | `avatar-ready` | `{ video, faceId }` | the face is live; `video` is an `HTMLVideoElement` |
 | `avatar-failed` | `string` | no face this session — the reason. Not fatal |
 | `mic-lost` / `mic-restored` | — | the microphone stopped producing audio mid-session (unplugged, taken by another app, permission revoked) and came back. The session stays up, so tell the caller rather than tearing down. |
-| `server-message` | `unknown` | structured messages from the agent, passed through untouched. Everything the SDK parses into a typed event below is **also** delivered here, so nothing you already parse by hand goes away. Two are *not* forwarded: the out-of-credit notice and `demo-limit`, which are consumed and re-emitted as `error` / `demo-limit` — they are failures, not application data, and this event never carried them |
+| `server-message` | `unknown` | structured messages from the agent, passed through untouched. Everything the SDK parses into a typed event below is **also** delivered here, so nothing you already parse by hand goes away. **Four wire shapes are consumed and never forwarded** — see below |
 | `error` | `string`, `WhissleErrorDetail` | see [Errors](#errors) |
+
+**What `server-message` does not carry.** Exactly four message shapes are
+consumed and never re-emitted:
+
+| Wire shape | Why | What you get instead |
+|---|---|---|
+| `{ t: "simli-audio", pcm }` | avatar lip-sync frames, several a second | nothing — they drive the face |
+| `{ t: "simli-clear" }` | avatar buffer reset | nothing |
+| `{ type: "error", error: "no_credits" }` | a failure, not application data | `error` with `code: "no-credit"` |
+| `{ type: "demo-limit" }` | a failure, not application data | `demo-limit`, then `error` with `code: "demo-limit"` |
+
+Everything else falls through, including the tool, signal, metadata, `gist`,
+`mic_dead` and `agent_error` families that 0.5.0 also parses into typed events —
+forwarding them was the only way to reach them before 0.5.0, and taking it away
+to make the routing tidier would break every integrator parsing them by hand.
 
 What the agent is **doing** — new in 0.5.0, and the reason an embedded agent used
 to go silent for seconds at a time with no explanation:
@@ -249,11 +358,11 @@ to go silent for seconds at a time with no explanation:
 | Event | Payload | When |
 |---|---|---|
 | `thinking` | `{ active, tool?, label? }` | one boolean for "it's working, that's why it's quiet". Collapses however many tools are in flight into a single edge each way, and clears when the agent starts speaking. This is what a "thinking strip" hangs off. |
-| `tool-started` | `{ id, name, arguments, sound }` | the agent called a tool. The SDK plays the earcon itself; `sound` is exposed so you can do your own. |
-| `tool-progress` | `{ id, name, display, data }` | an interim line from inside a long tool ("Reading source 2 of 3…") |
-| `tool-finished` | `{ id, name, ok, result, evidence }` | it came back. `ok` is `undefined` — not `false` — when the tool timed out and its success is genuinely unknown. `evidence` carries citations when it answered from a document. |
+| `tool-started` | `ToolStarted` — `{ id?, name?, arguments?, sound?, raw }` | the agent called a tool. The SDK plays the earcon itself; `sound` is exposed so you can do your own. |
+| `tool-progress` | `ToolProgress` — `{ id?, name?, display?, data?, raw }` | an interim line from inside a long tool ("Reading source 2 of 3…"). `display` is written to be shown as-is. |
+| `tool-finished` | `ToolFinished` — `{ id?, name?, ok?, result?, evidence?, sound?, raw }` | it came back. `ok` is `undefined` — not `false` — when the tool didn't say, so its success is genuinely unknown. `evidence` carries citations when it answered from a document. `sound` is set **only on failure**: the agent is about to speak the answer, so a chime on every success would turn the bank into wallpaper. |
 | `gist` | `string` | a one-line caption of the reply being spoken right now. Only on agents configured to emit one. |
-| `user-metadata` | `UserMetadata` | the live acoustic read of the caller — see [Emotion](#emotion-and-the-neutral-problem) before you render it |
+| `user-metadata` | `UserMetadata` | the live acoustic read of the caller — see [Emotion](#emotion-and-the-neutral-problem) before you render it. **Not emitted at all** when neither an emotion nor an intent survived the read; the raw payload still reaches `server-message`. |
 | `signal` | `LiveSignal` | one event from the pipeline's live signal stream (barge-in, endpointing, language switches, entities, flow state). The stream is versioned and additive-only, so a future schema arrives as the same fields plus ones this build ignores — `signal.version` if you care, `signal.raw` for the rest. |
 | `demo-limit` | `unknown` | this session hit the anonymous demo cap and is ending |
 
@@ -272,6 +381,8 @@ called from a click: browsers leave an `AudioContext` suspended otherwise and
 every cue becomes a silent no-op.
 
 ```ts
+import { WhissleAgent } from "@whissle/agents";
+
 new WhissleAgent({ apiKey: "wpk_…", agentId: "…", earcons: false });             // silent
 new WhissleAgent({ apiKey: "wpk_…", agentId: "…", earcons: { volume: 0.6 } });   // quieter
 new WhissleAgent({ apiKey: "wpk_…", agentId: "…", earcons: { bankUrl: "/sounds/tool" } });
@@ -282,11 +393,18 @@ agent.setEarconsMuted(true);             // wire this to your mute button
 
 **You get the real clips, from whissle.ai's own bank.** It is served publicly with
 `access-control-allow-origin: *`, so an embed on your origin plays the exact mp3s
-the dashboard does — no hosting, no configuration. The nine clips reserved for the
-tools that fire on nearly every call (`search_knowledge_base`, `book_appointment`,
-`send_email` …) plus the failure cue are warmed inside `start()`, which is already
-inside your click; the rest arrive on first use. That is ~18 KB, and the whole bank
-is only ~85 KB.
+the dashboard does — no hosting, no configuration. **Nine clips are warmed inside
+`start()`** (which is already inside your click): one per category — `search_0`,
+`create_0`, `update_0`, `send_0`, `handoff_0`, `media_0`, `capture_0`,
+`generic_0` and the failure cue `error_0`. Variant `0` is reserved for the tools
+that fire on nearly every call (`search_knowledge_base`, `book_appointment`,
+`send_email` …); everything else arrives on first use. That warm set is ~18 KB,
+and the whole bank is 52 clips / ~85 KB.
+
+A clip name is always `<category>_<variant>` — the nine categories are `search`,
+`create`, `update`, `send`, `handoff`, `media`, `capture`, `generic` and `error`.
+The platform resolves every tool name, including one invented mid-call, to one of
+them; the SDK only validates the shape and never invents a mapping of its own.
 
 A cue **never waits on the network**. If a clip isn't decoded yet the SDK plays a
 synthesised equivalent immediately and warms the cache for next time — so the first
@@ -312,14 +430,24 @@ and tools as the voice channel.
 ```ts
 // No call up: an HTTP turn. Needs no microphone and no WebRTC at all.
 const turn = await agent.sendText("what's your refund policy?");
-turn.reply;        // the whole reply
-turn.toolsUsed;    // ["search_knowledge_base"]
-turn.evidence;     // citations, when it answered from a document
+if (turn) {
+  turn.reply;        // the whole reply
+  turn.toolsUsed;    // ["search_knowledge_base"]
+  turn.evidence;     // citations, when it answered from a document
+}
 
 // During a live call: injected into the SAME conversation, answered out loud.
 // Resolves with null — the reply arrives as speech, via agent-transcript.
 await agent.sendText("k.singla@example.com");
 ```
+
+**`sendText` returns `TextTurn | null`, and the `null` is load-bearing** — it is
+how you tell the two channels apart. A `null` means a voice session was up and
+the message went into it, so the reply will arrive as speech on
+`agent-transcript` rather than in this promise. An empty or whitespace-only
+message also returns `null`, without spending a metered turn. Narrow before you
+read `.reply`; a snippet that skips the check compiles only because someone
+turned `strict` off.
 
 Images can ride along on the HTTP path:
 `sendText(text, { images: ["data:image/png;base64,…"] })`.
@@ -333,8 +461,12 @@ const saved = localStorage.getItem("whissle-thread");
 if (saved) agent.resumeTextThread(saved);          // no network — applied on first send
 
 const turn = await agent.sendText("hi again");
-localStorage.setItem("whissle-thread", turn.threadId);
+if (turn?.threadId) localStorage.setItem("whissle-thread", turn.threadId);
 ```
+
+`threadId` is `string | null` — the gateway has not always filed a thread by the
+time it answers — so persist it only when it is there rather than writing
+`"null"` into storage and resuming cold on the next visit.
 
 Use `threadId`, **not** `conversationId`. `conversationId` is the gateway's
 conversation row id, useful for correlating with the session history API and
@@ -359,6 +491,8 @@ a fake stream that arrives all at once would be a worse lie than no stream.
 on. Existing one-argument handlers are unaffected.
 
 ```ts
+import type { WhissleErrorDetail } from "@whissle/agents";
+
 agent.on("error", (message, detail) => {
   if ((detail as WhissleErrorDetail)?.code === "no-credit") showBillingLink();
   else show(String(message));
@@ -378,6 +512,14 @@ agent.on("error", (message, detail) => {
 | `agent-down` | the agent's model is failing |
 | `demo-limit` | the anonymous demo cap |
 | `connection` | anything else |
+
+`detail.status` carries the HTTP status when the failure came from a request.
+
+**Two different things are called `code`.** `WhissleErrorDetail.code` is the
+string union above. `WhissleTextError.code` — thrown by `sendText`, not delivered
+on the `error` event — is an **HTTP status number**, so a caller can branch on
+`404` directly. `sendText` does both: it emits a coded `error` event *and*
+rejects with a `WhissleTextError`.
 
 ## Microphone
 
@@ -409,7 +551,17 @@ warns. A preflight that is on by default and can refuse a working microphone wou
 be a worse failure than the deaf session it prevents, because the visitor never gets
 far enough to find out.
 
+`checkMicrophone()` never throws — every failure comes back as a `MicProblem`,
+and `null` means the mic is usable. It also releases every track it opened
+immediately, so the check itself never becomes the app holding the microphone.
+
 Pass `micPreflight: false` if your page manages permission itself.
+
+> **Untested in a browser.** The preflight's decision table is unit-tested
+> against a stubbed `navigator.mediaDevices`, including the `muted`-grace race.
+> Real devices are not: `listMicrophones()` and `setMicrophone()` have never run
+> against actual hardware in CI, and device labels only become real after the
+> user grants permission. See [What isn't tested](#what-isnt-tested).
 
 ## Emotion and the NEUTRAL problem
 
@@ -427,8 +579,34 @@ reading would let you draw "the caller is calm" out of "we don't know".
 `undefined` is therefore the whole answer for both "no reading" and "neutral".
 When a real emotion *is* reported it comes with the model's own probability, which
 tops out around 0.63 on low-arousal states — render it as a leaning, not a fact.
-`raw` has the untouched payload, distributions included, if you want to decide for
-yourself.
+
+Suppression is about not *asserting* a reading, not about hiding numbers. **The
+full distribution stays on `raw`** — `meta.raw.probs.emotion`, an array of
+`{ token, probability }` with the platform's own unstripped tokens
+(`EMOTION_NEUTRAL` and all), alongside `age` and `gender`. When a non-neutral
+emotion *is* reported, the same distribution is also parsed onto
+`meta.emotion.candidates` with labels prefix-stripped (`EMOTION_HAPPY` → `HAPPY`)
+and `NEUTRAL` still in the list.
+
+```ts
+import type { UserMetadata } from "@whissle/agents";
+
+agent.on("user-metadata", (payload) => {
+  const meta = payload as UserMetadata;
+  if (!meta.emotion) return;            // nothing was detected — say nothing
+  showLeaning(meta.emotion.label, meta.emotion.confidence);
+});
+```
+
+Two consequences worth knowing before you build a UI on this:
+
+- **Intent is not suppressed.** Only `emotion` has the NEUTRAL problem;
+  `intent` is reported exactly as sent, `INTENT_OTHER` included.
+- **When neither survives, no `user-metadata` event fires at all** — the SDK
+  won't wake a handler to hand it two `undefined`s. So "no frames arrived" and
+  "frames arrived carrying nothing confident" look the same on this event. If you
+  need to tell them apart, count the raw messages on
+  [`server-message`](#events), which still receives every one of them.
 
 ## Talking to the running agent
 
@@ -457,6 +635,8 @@ works on both transports.
 ## Options
 
 ```ts
+import { WhissleAgent } from "@whissle/agents";
+
 new WhissleAgent({
   apiKey: "wpk_…",       // a publishable key — or use sessionToken / getToken
   sessionToken: "…",     // a token your backend already minted
@@ -471,6 +651,12 @@ new WhissleAgent({
 });
 ```
 
+Defaults: `baseUrl` is `https://aws-gateway-backend.whissle.ai/bot` (**both the
+`aws-` prefix and the `/bot` suffix are load-bearing** — see [Base
+URL](#base-url)); `transport` is `"auto"`; `earcons` and `micPreflight` are on;
+`iceServers` falls back to three public STUN servers unless the mint or you say
+otherwise. `avatar` is off.
+
 Read-only: `agent.state`, `agent.transport`, `agent.session` (what the mint said —
 agent name, greeting, TTL, `text_enabled`), `agent.videoElement`,
 `agent.textThread`.
@@ -483,6 +669,35 @@ a long-lived page doesn't accumulate handlers and everything they close over.
 LiveKit — and, if that fails to come up, takes the fallback the *same mint* named
 (SmallWebRTC). Naming a transport explicitly opts out of that: you asked for a
 specific one, so it fails loudly rather than quietly moving you somewhere else.
+
+## Base URL
+
+```
+https://aws-gateway-backend.whissle.ai/bot
+```
+
+That is the default; you only pass `baseUrl` for a self-hosted or staging
+gateway. **Both halves are load-bearing.**
+
+- **`aws-`** names the live host. The older `gateway-backend.whissle.ai` was
+  retired *and its static IP released*, so it can be reassigned to a stranger.
+  Nothing should be sent there.
+- **`/bot`** is the gateway's mount prefix for the platform API, not decoration.
+  Drop it and every request 404s.
+
+**Do not smoke-test the prefix with `/health`** — it answers `200` **with and
+without** it, so the obvious check cannot detect a missing prefix. Only an API
+route discriminates:
+
+```bash
+curl -o /dev/null -w '%{http_code}\n' https://aws-gateway-backend.whissle.ai/bot/api/whoami  # 401 — right host, no key
+curl -o /dev/null -w '%{http_code}\n' https://aws-gateway-backend.whissle.ai/api/whoami      # 404 — prefix missing
+```
+
+Unlike [`@whissle/sdk`](https://www.npmjs.com/package/@whissle/sdk), this SDK
+does **not** validate `baseUrl` or reject the retired host — it concatenates what
+you give it, without even normalising a trailing slash. Getting it wrong shows up
+as a 404 from the session mint, surfaced as an `error` with `code: "not-found"`.
 
 ## Bundle size
 
@@ -524,7 +739,7 @@ the full build:
 If you ask the lean build for an avatar it emits `avatar-failed` telling you to
 use the full build, and the session continues audio-only.
 
-## Node ESM / SSR
+## Node ESM and SSR
 
 `import("@whissle/agents")` used to throw before any of our code ran:
 
@@ -560,21 +775,36 @@ in Node (ESM or CJS) is safe. Note the SDK still needs a browser to actually
 
 ## Testing
 
-`npm test` — 242 cases, Vitest, no browser needed. They cover the decisions
-`start()` makes before any media flows (credential selection, transport choice
-and fallback, the query params the gateway is asked for, the mic preflight and its
-severity split, the audio-only path when an avatar mint fails), the transcript/turn
-de-duplication, and the wire formats: the outbound `client-message` envelope, the
-earcon clip-name guard and bank fallback, the tool-event parse, the thinking
-bookkeeping, the `NEUTRAL` suppression, the signal envelope's forward compatibility,
-and the text channel's thread key.
+```bash
+npm test              # 245 cases across 17 files, Vitest, no browser needed
+npm run typecheck     # src and tests, --strict, --skipLibCheck false
+npm run check:readme  # every TypeScript snippet in this file, compiled against src/
+```
+
+The suite covers the decisions `start()` makes before any media flows (credential
+selection, transport choice and fallback, the query params the gateway is asked
+for, the mic preflight and its severity split, the audio-only path when an avatar
+mint fails), the transcript/turn de-duplication, and the wire formats: the
+outbound `client-message` envelope, the earcon clip-name guard and bank fallback,
+the tool-event parse, the thinking bookkeeping, the `NEUTRAL` suppression, the
+signal envelope's forward compatibility, and the text channel's thread key.
+
+`npm run check:readme` exists because this README is API surface: a snippet a
+reader pastes first and that does not compile is a bug report from someone who
+has already decided the library is careless. It rewrites `@whissle/agents` to
+`src/index.ts`, so the snippets are checked against **this checkout**, not a
+published build. There is no skip marker — a block that cannot be made to compile
+should be prose.
 
 ### What isn't tested
 
 Vitest runs in Node. Everything below is therefore **unverified by the suite** and
 can only be confirmed by loading the SDK in a real browser — which
-[`examples/interview-platform`](examples/interview-platform) exists to make a
-one-command job (`npm start`, and it serves the local build, not a published one):
+[`examples/interview-platform`](https://github.com/WhissleAI/agents_js_sdk/tree/main/examples/interview-platform)
+and
+[`examples/observability-console`](https://github.com/WhissleAI/agents_js_sdk/tree/main/examples/observability-console)
+exist to make a one-command job (`npm start`, and they serve the local build, not
+a published one):
 
 - **The WebRTC handshake.** The suite stubs the seam just above
   `PipecatClient.connect()`. A real SDP exchange, trickle ICE and the media path
@@ -583,10 +813,19 @@ one-command job (`npm start`, and it serves the local build, not a published one
   pinned byte-for-byte against `bot/runners.py`, but the socket it goes down is not.
 - **The Simli render loop.** The mint and the audio-only fallback are covered; the
   frames on screen are not.
-- **Autoplay policy.** Whether a browser lets the agent's audio and the tool cues
-  through is a per-browser, per-gesture decision no fake `AudioContext` can model.
-- **How the cues sound.** The mapping is deterministic and pinned; the audio is a
-  judgement call.
+- **Autoplay policy.** Partly covered, and the gap is specific: the
+  suspended-`AudioContext` path *is* pinned against a fake context (the element
+  plays unmuted while suspended, self-upgrades when it resumes, retries on a
+  pointer event). What has **no test at all** is the other half — a real
+  `<audio>.play()` rejection, which is what raises `code: "autoplay"`. Whether a
+  given browser lets the agent's voice and the tool cues through is a
+  per-browser, per-gesture decision no fake context can model.
+- **How the cues sound.** The mapping is deterministic and pinned, and the fetch
+  URLs are asserted; nothing in the suite renders or plays audio. Whether the
+  bank is reachable, decodable and audible over speech is a listening test.
+- **Microphone device switching.** `listMicrophones()` and `setMicrophone()` are
+  never exercised against real devices — `getUserMedia` and `enumerateDevices`
+  are stubbed throughout.
 - **The mobile playout graph.** The node graph and its values are pinned against a
   fake context. Whether it is actually louder on an iPhone is a phone question —
   `window.__whissleAudioBoost()` reports the live measurement from the device.
