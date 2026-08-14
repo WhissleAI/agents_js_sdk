@@ -1,7 +1,7 @@
 {
   "name": "@whissle/agents",
   "version": "0.5.0",
-  "description": "Embed a Whissle voice agent into any web app. Create/configure the agent on platform.whissle.ai, then run a live conversation with a publishable key.",
+  "description": "Embed a Whissle voice or text agent into any web app. Create/configure the agent on whissle.ai, then run a live conversation with a publishable key.",
   "license": "MIT",
   "author": "Whissle AI <support@whissle.ai>",
   "type": "module",
@@ -29,13 +29,14 @@
     "LICENSE"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "sideEffects": false,
   "scripts": {
     "build": "tsup && node scripts/normalize-sourcemaps.mjs",
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit --skipLibCheck false",
+    "check:readme": "node scripts/check-readme.mjs",
     "prepack": "npm run build",
     "test": "vitest run",
     "prepare": "npm run build"

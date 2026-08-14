@@ -7,7 +7,7 @@
     "start": "node server.mjs"
   },
   "dependencies": {
-    "@whissle/sdk": "^0.2.0"
+    "@whissle/sdk": "^0.3.0"
   },
   "engines": { "node": ">=20" }
 }
