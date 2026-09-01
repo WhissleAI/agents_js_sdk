@@ -98,9 +98,10 @@ async function resolveAgent() {
     type: agent.agent_type ?? agent.type ?? null,
     greeting: agent.greeting ?? null,
     // The transcriber. NOT a verdict on the affect lanes: the metadata head can run
-    // as a sidecar beside a Deepgram ear, and on this deployment it does — a Deepgram
-    // agent still delivered emotion and intent distributions. Only the frames that
-    // actually arrive can say, which is why the console counts them on screen.
+    // as a sidecar beside whichever ear the agent is configured with, and on this
+    // deployment it does — such an agent still delivered emotion and intent
+    // distributions. Only the frames that actually arrive can say, which is why the
+    // console counts them on screen.
     stt: agent.stt_provider ?? null,
     tools: (agent.tools ?? []).filter((t) => t?.enabled !== false).map((t) => t.name ?? t),
   };
@@ -265,8 +266,9 @@ createServer(async (req, res) => {
     console.log(`  agent   ${a.name}  (${a.id})`);
     // Deliberately NOT a claim about what the affect lanes will carry. `stt_provider`
     // is the transcriber; the metadata head can be running beside it as a sidecar, and
-    // on this deployment it demonstrably is (a Deepgram agent still delivered emotion
-    // and intent distributions). Only the frames that actually arrive can say.
+    // on this deployment it demonstrably is (an agent on the primary ear still
+    // delivered emotion and intent distributions). Only the frames that actually
+    // arrive can say.
     console.log(`  ear     ${a.stt ?? "unknown"}`);
     console.log(`  tools   ${a.tools.join(", ") || "none declared"}\n`);
   } catch (err) {

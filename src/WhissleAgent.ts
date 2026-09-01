@@ -64,6 +64,49 @@ export interface WhissleSessionInfo {
   session_id?: string;
   ice_servers?: RTCIceServer[];
   transport?: { kind?: string; url?: string; token?: string };
+  /**
+   * HOW LONG this session may run, and why it is bounded.
+   *
+   * Every anonymous embed session has a ceiling (the landing demo is shorter than
+   * a regular public embed), and the pipeline ends the session at it — until the
+   * mint said so, the only shipped listener was the landing page, and every other
+   * embed simply went silent mid-sentence at exactly the cap. `max_session_seconds`
+   * is `null`/absent when nothing caps this session; `reason` names which rule set
+   * it (`"demo"` or `"public"`); `end_signal` is the envelope the pipeline sends
+   * just before it hangs up — the SDK already surfaces it as the `demo-limit`
+   * event, so listen for that rather than re-parsing the wire. Your own countdown
+   * from `max_session_seconds` is the backstop for the signal never arriving.
+   */
+  limits?: {
+    max_session_seconds?: number | null;
+    reason?: "demo" | "public" | null;
+    end_signal?: Record<string, unknown>;
+  };
+  /**
+   * What this agent can SEE — whether offering a camera would reach anything.
+   *
+   * A keyframe sent to an agent whose visual mode is not `hybrid` is accepted on
+   * the data channel and dropped without a word, so a widget that guessed would be
+   * offering a webcam to a void. `camera` means a camera does anything at all
+   * (on `perception`, browser-side presence/gaze packets are consumed while no
+   * pixel leaves the device); `vision` means keyframes reach a vision model — the
+   * one a "let it see" button should gate on. `mode` is the resolved dial:
+   * `"off" | "perception" | "hybrid"`.
+   */
+  visual?: { mode?: string; camera?: boolean; vision?: boolean };
+  /**
+   * Whether this agent may know WHERE the visitor is — what to offer before
+   * anyone speaks.
+   *
+   * `tier` is `"none" | "coarse" | "precise"`; `enabled` is `tier !== "none"`.
+   * `purpose` is non-empty only on `precise`, and is the operator's own sentence
+   * for the consent card — show it verbatim when prompting for geolocation.
+   * A precise fix is handed to the running agent as
+   * `agent.send("location", { lat, lon, accuracy_m, source })`; on any other tier
+   * the pipeline drops it, which is why this descriptor exists — never prompt for
+   * GPS the bot would then ignore.
+   */
+  location?: { tier?: string; enabled?: boolean; purpose?: string };
 }
 
 export interface WhissleAgentOptions {
@@ -149,6 +192,53 @@ export interface WhissleAgentOptions {
    * Default `true`. See `./mic` for why this is not paranoia.
    */
   micPreflight?: boolean;
+  /**
+   * Your OWN identifiers for this session — `{ student_id: "…", application_id:
+   * "…" }` — sent with the mint, echoed back on it, and stamped onto the session
+   * record. Correlating a Whissle session to your user then becomes a lookup
+   * instead of "list the agent's calls and match on timestamp".
+   *
+   * Flat string/number/boolean values only, and small (the gateway enforces at
+   * most 12 keys, 256 characters per value, ~1 KB total — a malformed blob is
+   * refused with a 400 that says which rule it broke). Kept server-side under its
+   * own reserved key, so nothing in it can shadow an internal field.
+   *
+   * Only meaningful on the `apiKey` mint path: with `sessionToken` / `getToken`
+   * YOUR backend does the minting and passes its own `metadata` there.
+   */
+  metadata?: Record<string, string | number | boolean>;
+}
+
+/** Where the stable per-visitor id lives across page loads. */
+const BROWSER_ID_KEY = "whissle:browser-id";
+
+/**
+ * A stable, anonymous per-visitor id, persisted in this browser.
+ *
+ * Sent with the mint as `browser_id`. The gateway uses it for exactly one thing:
+ * the daily cap on the free landing demo agent, per browser as well as per IP —
+ * without it, everyone behind one corporate NAT shares an allowance. It is a
+ * random id, minted here, never derived from anything about the visitor.
+ *
+ * Every touch of `localStorage` is inside the try: the ACCESSOR itself throws in
+ * some contexts (storage disabled, some private windows), not just the calls.
+ * `undefined` is always a safe answer — the mint treats an absent id as IP-only
+ * capping — so a visitor with storage off gets a session, not an exception.
+ */
+function browserId(): string | undefined {
+  try {
+    const store = localStorage;
+    const existing = store.getItem(BROWSER_ID_KEY);
+    if (existing) return existing;
+    const id =
+      typeof crypto !== "undefined" && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `bid-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+    store.setItem(BROWSER_ID_KEY, id);
+    return id;
+  } catch {
+    return undefined;
+  }
 }
 
 export type WhissleEvent =
@@ -332,12 +422,20 @@ function mintFailure(
         message: "This agent is out of credit. Top up the workspace wallet to start sessions.",
       };
     case 403:
+      // The gateway 403s for genuinely different reasons — a key missing the
+      // embed-mint scope, an embed with no origin allowlist configured at all, and
+      // an origin that isn't on it — and writes a distinct `detail` for each. Only
+      // the LAST of those is fixed by adding this origin, so hardcoding the
+      // allowlist sentence sent the developer to the wrong settings page for the
+      // other two. Prefer the server's own words; the allowlist message (with the
+      // origin to add) stays the fallback for a gateway that sent none.
       return {
         code: "origin-not-allowed",
         message:
+          detail ||
           "This site isn't allowed to embed this agent. Add " +
-          (typeof location !== "undefined" ? location.origin : "its origin") +
-          " to the allowed origins in the agent's Embed settings.",
+            (typeof location !== "undefined" ? location.origin : "its origin") +
+            " to the allowed origins in the agent's Embed settings.",
       };
     case 404:
       return {
@@ -565,6 +663,12 @@ export class WhissleAgent {
         ...(apiKey.startsWith("wek_") ? { embed_key: apiKey } : { api_key: apiKey }),
         agent_id: this.opts.agentId,
         parent_origin: typeof location !== "undefined" ? location.origin : undefined,
+        // The stable per-visitor id. Only the free demo agent's daily cap reads it;
+        // for every other agent the gateway ignores it entirely.
+        browser_id: browserId(),
+        // The caller's own correlation ids, passed through verbatim. The gateway
+        // validates, scrubs and echoes them — see `WhissleAgentOptions.metadata`.
+        metadata: this.opts.metadata,
       }),
     });
     if (!res.ok) {
@@ -1286,6 +1390,15 @@ export class WhissleAgent {
     const channel = await this.ensureTextChannel();
     try {
       const turn = await channel.send(text, opts);
+      // The turn's tool cards go out through the SAME event the voice channel uses,
+      // so whatever renders a card for a spoken booking renders it for a typed one
+      // with no second code path. Cards first, then the reply — the order a live
+      // call delivers them in. Deliberately no earcon and no `thinking` edge here:
+      // both exist to explain a silence that is still happening, and by the time an
+      // HTTP turn resolves there is nothing left to wait for.
+      for (const card of turn.toolEvents) {
+        this.emit("tool-finished", card satisfies ToolFinished);
+      }
       // Emit it as an ordinary turn as well, so a UI wired for voice lights up for
       // typed messages without a second code path.
       if (turn.reply) this.emit("agent-transcript", turn.reply);

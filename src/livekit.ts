@@ -2,7 +2,7 @@ import { RTVIMessage, RTVIMessageType } from "@pipecat-ai/client-js";
 // Type-only: erased at build time, so livekit-client stays a lazy chunk.
 import type { Room as LiveKitRoom } from "livekit-client";
 
-/** What `POST /api/embed/livekit` returns — the Tavus-shaped transport descriptor. */
+/** What `POST /api/embed/livekit` returns — the industry-standard {url, token} transport descriptor. */
 export interface LiveKitConnectInfo {
   url: string;
   token: string;

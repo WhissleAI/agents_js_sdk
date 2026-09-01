@@ -369,6 +369,10 @@ to go silent for seconds at a time with no explanation:
 Correlate tool events by `id` (`tool_call_id`), never by `name` — two calls to the
 same tool can be in flight at once.
 
+`tool-finished` also fires for **typed** turns: `sendText`'s HTTP path returns the
+same result cards (`turn.toolEvents`) and the SDK replays each one through this
+event, so a card renderer needs no second branch — see [Text](#text).
+
 ## Tool earcons
 
 When an agent calls a tool it stops talking for as long as the tool takes. Without
@@ -434,6 +438,7 @@ if (turn) {
   turn.reply;        // the whole reply
   turn.toolsUsed;    // ["search_knowledge_base"]
   turn.evidence;     // citations, when it answered from a document
+  turn.toolEvents;   // the structured tool cards, in tool-finished's own shape
 }
 
 // During a live call: injected into the SAME conversation, answered out loud.
@@ -451,6 +456,17 @@ turned `strict` off.
 
 Images can ride along on the HTTP path:
 `sendText(text, { images: ["data:image/png;base64,…"] })`.
+
+**Tool cards render one way.** A typed turn's tools produce the same structured
+cards a spoken one does — the table a lookup returned, the booking confirmation,
+the citation list — in the *same* `{kind:"tool", phase:"result", …}` envelope the
+voice pipeline ships on the data channel. `toolEvents` carries them parsed into
+`ToolFinished` (the `tool-finished` payload shape), **and** the SDK re-emits each
+one as a `tool-finished` event before the `agent-transcript`, so whatever your
+page renders for a voice tool call renders for a typed one with no second code
+path. No earcon and no `thinking` edge on this path, deliberately: both exist to
+explain a silence that is still happening, and by the time the HTTP turn resolves
+there is nothing left to wait for.
 
 **Resuming a thread.** Consecutive messages continue one conversation on their own.
 To pick it up again on a *later page load*, persist `agent.textThread` and hand it
@@ -632,6 +648,58 @@ uses — `send` published an envelope the agent does not read, so every control
 message was dropped by the far side with nothing anywhere to say so. `send` now
 works on both transports.
 
+## What the mint says about the session
+
+`agent.session` is the mint's full answer, and three of its fields describe
+capabilities your UI should read *before* offering anything:
+
+```ts
+const info = agent.session; // set by start(), or by sendText()'s first mint
+
+// HOW LONG this session may run. Real on every anonymous embed — the pipeline
+// ends the session at the cap, and a widget that doesn't know simply goes
+// silent mid-sentence at exactly that moment, which reads as a freeze.
+info?.limits?.max_session_seconds; // e.g. 120 — null/absent = unbounded
+info?.limits?.reason;              // "demo" | "public"
+
+// WHETHER A CAMERA WOULD REACH ANYTHING. A keyframe sent to a non-hybrid agent
+// is accepted on the data channel and dropped without a word.
+info?.visual?.vision;              // gate a "let it see" button on this one
+info?.visual?.camera;              // presence/gaze only — no pixel leaves the device
+
+// WHETHER THE AGENT MAY KNOW WHERE THE VISITOR IS.
+info?.location?.enabled;           // tier !== "none"
+info?.location?.purpose;           // the operator's consent sentence — show verbatim
+```
+
+The end of a capped session is announced twice, and you should use both: the
+`demo-limit` event is the pipeline's own envelope, sent just before it hangs up;
+a countdown you run from `max_session_seconds` is the backstop for that envelope
+never arriving. The ready-made widget does exactly this — a clock in the header
+and an end-card in the log — so `mount()` callers get it without writing
+anything.
+
+**Sharing location.** On a `precise` tier, hand the running agent a fix over the
+data channel and its place/directions/weather tools receive it automatically:
+
+```ts
+if (agent.session?.location?.tier === "precise") {
+  navigator.geolocation.getCurrentPosition((pos) => {
+    agent.send("location", {
+      lat: pos.coords.latitude,
+      lon: pos.coords.longitude,
+      accuracy_m: pos.coords.accuracy,
+      source: "gps",
+    });
+  });
+}
+```
+
+Gate the prompt on the descriptor, always: on any other tier the pipeline drops
+the fix, and a permission dialog for coordinates the agent then ignores is the
+worst of both worlds. `lat`/`lon` are required; `accuracy_m` and `source` are
+optional. Ask *after* the visitor requests something local, not on page load.
+
 ## Options
 
 ```ts
@@ -648,8 +716,23 @@ new WhissleAgent({
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }],  // wins over the mint's
   earcons: true,         // true | false | { enabled, volume, bankUrl }
   micPreflight: true,    // check the mic before connecting
+  metadata: { student_id: "S-42" }, // your own ids, stamped onto the session
 });
 ```
+
+`metadata` is for **partner correlation**: your own identifiers for this session,
+sent with the mint, echoed back on it, and stamped onto the session record — so
+matching a Whissle session to your user is a lookup, not "list the agent's calls
+and match on timestamp". Flat string/number/boolean values, small (at most 12
+keys, 256 characters a value, ~1 KB total — the gateway refuses a malformed blob
+with a 400 that says which rule it broke). Only meaningful on the `apiKey` mint
+path; with `sessionToken`/`getToken` your backend mints and passes its own.
+
+The SDK also sends a stable, anonymous `browser_id` with the mint — a random id
+persisted in `localStorage`, derived from nothing about the visitor. The gateway
+uses it for exactly one thing: the free landing demo agent's daily cap, per
+browser as well as per IP. Storage unavailable (private windows, storage
+disabled) degrades silently to IP-only capping — never to a failed mint.
 
 Defaults: `baseUrl` is `https://aws-gateway-backend.whissle.ai/bot` (**both the
 `aws-` prefix and the `/bot` suffix are load-bearing** — see [Base
@@ -658,7 +741,9 @@ URL](#base-url)); `transport` is `"auto"`; `earcons` and `micPreflight` are on;
 otherwise. `avatar` is off.
 
 Read-only: `agent.state`, `agent.transport`, `agent.session` (what the mint said —
-agent name, greeting, TTL, `text_enabled`), `agent.videoElement`,
+agent name, greeting, TTL, `text_enabled`, plus the `limits`, `visual` and
+`location` descriptors — see [What the mint says about the
+session](#what-the-mint-says-about-the-session)), `agent.videoElement`,
 `agent.textThread`.
 
 `stop()` ends the session and keeps your event handlers, so the same instance can be

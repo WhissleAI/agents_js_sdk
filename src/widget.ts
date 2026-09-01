@@ -35,6 +35,9 @@ const CSS = `
 .wa-hd{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid #eef2ec;font-size:14px;font-weight:600}
 .wa-dot{width:8px;height:8px;border-radius:50%;background:#c4cfbe}
 .wa-dot.on{background:var(--wa-accent)}
+/* The session-ceiling countdown. Empty (and so invisible) unless the mint said this
+   session is bounded; tabular digits so it doesn't wobble as it counts. */
+.wa-timer{margin-left:auto;font-size:12px;font-weight:500;color:#6b7a70;font-variant-numeric:tabular-nums}
 .wa-face{position:relative;width:100%;aspect-ratio:1/1;max-height:52%;background:#0d1310;overflow:hidden;flex:0 0 auto}
 .wa-face video{width:100%;height:100%;object-fit:cover;display:block}
 .wa-log{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:8px;font-size:14px;line-height:1.45}
@@ -87,7 +90,7 @@ export function mount(target: string | HTMLElement, options: WidgetOptions): Whi
 
   root.innerHTML = `
     <div class="wa-w" style="--wa-accent:${accent}">
-      <div class="wa-hd"><span class="wa-dot" data-dot></span><span data-title>${options.title || "Talk to the assistant"}</span></div>
+      <div class="wa-hd"><span class="wa-dot" data-dot></span><span data-title>${options.title || "Talk to the assistant"}</span><span class="wa-timer" data-timer role="timer"></span></div>
       ${wantsAvatar ? '<div class="wa-face" data-face></div>' : ""}
       <div class="wa-log" data-log><div class="wa-hint" data-hint>Tap Start and allow your microphone to begin.</div></div>
       <div class="wa-err" data-err style="display:none" role="alert"></div>
@@ -112,6 +115,7 @@ export function mount(target: string | HTMLElement, options: WidgetOptions): Whi
   const sayRow = $<HTMLDivElement>("[data-say-row]");
   const say = $<HTMLInputElement>("[data-say]");
   const sendBtn = $<HTMLButtonElement>("[data-send]");
+  const timer = $<HTMLSpanElement>("[data-timer]");
 
   // Point the avatar at the stage we just rendered, unless the caller named
   // their own container — their layout wins over ours.
@@ -130,6 +134,49 @@ export function mount(target: string | HTMLElement, options: WidgetOptions): Whi
     log.scrollTop = log.scrollHeight;
   };
 
+  // ── the session ceiling ──────────────────────────────────────────────────────
+  //
+  // The mint SAYS whether this session is bounded (`session.limits` — derived from
+  // the same rule the pipeline arms its own timer from), so the widget can draw a
+  // countdown and explain the end instead of appearing to freeze mid-sentence at
+  // exactly the cap. The `demo-limit` event — the SDK's surfacing of the envelope
+  // the pipeline sends just before it hangs up — is the authoritative end; the
+  // local clock is the backstop for that envelope never arriving.
+  let countdown: ReturnType<typeof setInterval> | null = null;
+  let capExplained = false;
+  const clearCountdown = () => {
+    if (countdown) clearInterval(countdown);
+    countdown = null;
+    timer.textContent = "";
+  };
+  const explainEnd = () => {
+    if (capExplained) return;
+    capExplained = true;
+    clearCountdown();
+    hint?.remove();
+    const note = document.createElement("div");
+    note.className = "wa-hint";
+    note.textContent = sessionEnded(agent.session?.limits?.reason);
+    log.appendChild(note);
+    log.scrollTop = log.scrollHeight;
+  };
+  const startCountdown = () => {
+    clearCountdown();
+    capExplained = false;
+    const cap = agent.session?.limits?.max_session_seconds;
+    // `null`/absent means nothing caps this session — most customer embeds. No
+    // timer then: a clock on an unbounded call would be counting down to nothing.
+    if (typeof cap !== "number" || !(cap > 0)) return;
+    const endsAt = Date.now() + cap * 1000;
+    const tick = () => {
+      const left = Math.ceil((endsAt - Date.now()) / 1000);
+      timer.textContent = formatRemaining(left);
+      if (left <= 0) explainEnd(); // backstop — the server ends the session itself
+    };
+    tick();
+    countdown = setInterval(tick, 500);
+  };
+
   agent
     .on("connecting", () => {
       startBtn.textContent = "Connecting…";
@@ -140,13 +187,16 @@ export function mount(target: string | HTMLElement, options: WidgetOptions): Whi
       startBtn.textContent = "End";
       startBtn.classList.add("end");
       startBtn.disabled = false;
+      startCountdown();
     })
     .on("disconnected", () => {
       dot.classList.remove("on");
       startBtn.textContent = "Start";
       startBtn.classList.remove("end");
       startBtn.disabled = false;
+      clearCountdown();
     })
+    .on("demo-limit", () => explainEnd())
     .on("avatar-failed", () => {
       // The conversation is still coming up, audio-only — so take the empty
       // stage away rather than leaving a black rectangle and no explanation.
@@ -287,5 +337,20 @@ function working(tool?: string): string {
   return `${ing.charAt(0).toUpperCase()}${ing.slice(1)}${rest ? ` ${rest}` : ""}…`;
 }
 
-/** Exported for tests — the copy rule is worth pinning, the DOM around it isn't. */
-export const WIDGET_INTERNALS = { working };
+/** `125` → `"2:05"`. Floors at zero rather than ever counting negative — a clock
+ *  that reads "-0:03" says the widget lost track, which is worse than "0:00". */
+function formatRemaining(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+/** The end-card line, by the `limits.reason` the mint gave. Total over unknown
+ *  reasons — a future rule set must land on honest copy, not `undefined`. */
+function sessionEnded(reason?: string | null): string {
+  return reason === "demo"
+    ? "That's the end of the free demo — thanks for trying it."
+    : "This session reached its time limit.";
+}
+
+/** Exported for tests — the copy rules are worth pinning, the DOM around them isn't. */
+export const WIDGET_INTERNALS = { working, formatRemaining, sessionEnded };

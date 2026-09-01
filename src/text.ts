@@ -19,6 +19,8 @@
 // streaming sibling this is where it will land; until then the SDK does not pretend to
 // stream, because a fake stream that arrives all at once is a worse lie than no stream.
 
+import { parseToolEvent, type ToolFinished } from "./tool-events";
+
 /** What `POST /api/embed/chat/turn` returns. */
 export interface TextTurn {
   /** The agent's reply, in full. */
@@ -43,6 +45,20 @@ export interface TextTurn {
   toolsUsed: string[];
   /** Sources behind the reply, when the tools produced citations. */
   evidence: unknown[];
+  /**
+   * The structured per-tool cards this turn produced — the table a lookup
+   * returned, the booking confirmation, the citation list. The same
+   * `{kind:"tool", phase:"result", …}` envelope the voice pipeline ships on the
+   * data channel (`services/tool_events.build_tool_result_event` is the ONE
+   * definition, shared by both doors), parsed into the same `ToolFinished` shape
+   * the `tool-finished` event carries — so a card renderer needs no second
+   * branch for typed turns.
+   *
+   * The agent ALSO re-emits each of these as a `tool-finished` event, so a
+   * widget wired for voice cards lights up for text with no extra code; this
+   * field is for the caller who wants them with the reply, in order, in hand.
+   */
+  toolEvents: ToolFinished[];
 }
 
 /** An image to send with a text turn — a `data:` URL, or raw base64 with its type. */
@@ -193,6 +209,7 @@ export class TextChannel {
       session_id?: string;
       tools_used?: unknown;
       evidence?: unknown;
+      tool_events?: unknown;
     };
     if (j.conversation_id) this.conversationId = j.conversation_id;
     // Learn the key when we were minted without one. The response's `session_id` is
@@ -209,6 +226,28 @@ export class TextChannel {
       sessionId: j.session_id,
       toolsUsed: Array.isArray(j.tools_used) ? j.tools_used.map(String) : [],
       evidence: Array.isArray(j.evidence) ? j.evidence : [],
+      toolEvents: parseToolResults(j.tool_events),
     };
   }
+}
+
+/**
+ * The turn's `tool_events`, read with the SAME parser the voice channel uses.
+ *
+ * The gateway builds each element with `build_tool_result_event` — the one shared
+ * definition of a rendered tool card — so every element is a `phase:"result"`
+ * envelope today. Parsing (rather than trusting) keeps that a fact about the wire
+ * instead of an assumption in this SDK: an element of another phase, or one that
+ * isn't a tool envelope at all, is skipped rather than rendered wrong or thrown
+ * on. Forgiving, like `parseToolEvent` itself — these envelopes gain fields as
+ * the platform grows.
+ */
+function parseToolResults(raw: unknown): ToolFinished[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ToolFinished[] = [];
+  for (const item of raw) {
+    const parsed = parseToolEvent(item);
+    if (parsed?.phase === "result") out.push(parsed.data);
+  }
+  return out;
 }

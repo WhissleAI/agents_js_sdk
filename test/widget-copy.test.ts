@@ -46,3 +46,51 @@ describe("what the strip says while a tool runs", () => {
     }
   });
 });
+
+/**
+ * The session-ceiling countdown. The mint's `limits.max_session_seconds` is real on
+ * every anonymous embed, and until it was reported the widget went silent mid-sentence
+ * at exactly the cap — which reads as the agent freezing, not the free session ending.
+ * The clock and the end-card are the two lines a visitor actually sees, so pin them.
+ */
+const { formatRemaining, sessionEnded } = WIDGET_INTERNALS;
+
+describe("what the countdown reads", () => {
+  it.each([
+    [120, "2:00"],
+    [125, "2:05"],
+    [61, "1:01"],
+    [60, "1:00"],
+    [59, "0:59"],
+    [9, "0:09"],
+    [600, "10:00"],
+    [0, "0:00"],
+  ])("shows %i seconds as %o", (seconds, expected) => {
+    expect(formatRemaining(seconds)).toBe(expected);
+  });
+
+  it("floors at zero rather than counting negative", () => {
+    // A clock reading "-0:03" says the widget lost track — worse than "0:00" while
+    // the server's own end signal is in flight.
+    expect(formatRemaining(-3)).toBe("0:00");
+  });
+});
+
+describe("what the end-card says", () => {
+  it("names the demo ending as the demo ending", () => {
+    expect(sessionEnded("demo")).toMatch(/demo/i);
+  });
+
+  it("calls a public cap a time limit, not a demo", () => {
+    expect(sessionEnded("public")).toMatch(/time limit/i);
+    expect(sessionEnded("public")).not.toMatch(/demo/i);
+  });
+
+  it("is total over reasons this build has never heard of", () => {
+    // The rule sets grow server-side; an unknown reason must land on honest copy,
+    // never on "undefined".
+    for (const r of [undefined, null, "trial", ""]) {
+      expect(sessionEnded(r as never).length).toBeGreaterThan(10);
+    }
+  });
+});
