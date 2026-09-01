@@ -6,7 +6,7 @@
   "name": "Lulu — Whissle Demo",
   "id": "145cb6e2",
   "type": "companion",
-  "stt": "deepgram"
+  "stt": "primary"
  },
  "transport": "livekit",
  "source": "rehearsal",
@@ -32,7 +32,7 @@
     "agent": {
      "name": "Lulu — Whissle Demo",
      "id": "145cb6e2-bb7c-4b95-8484-fb0a87bea451",
-     "stt": "deepgram"
+     "stt": "primary"
     },
     "source": "rehearsal"
    }

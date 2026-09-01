@@ -10,12 +10,36 @@ import { WhissleAgent } from "../src/WhissleAgent";
  * DIFFERENTLY while a call is up.
  */
 
+/** One rendered tool card, exactly as `build_tool_result_event` ships it — the same
+ *  envelope the voice pipeline puts on the data channel. */
+const CARD = {
+  kind: "tool",
+  phase: "result",
+  tool_call_id: "call-1",
+  function_name: "search_knowledge_base",
+  ok: true,
+  result: { _display: "Found the refund policy.", items: [{ title: "Refunds" }] },
+  evidence: [{ document_id: "d1", quote: "…30 days…" }],
+};
+
 const OK = {
   reply: "Refunds are within 30 days.",
   conversation_id: "conv-1",
   session_id: "sess-1",
   tools_used: ["search_knowledge_base"],
   evidence: [{ document_id: "d1", quote: "…30 days…" }],
+  tool_events: [CARD],
+};
+
+/** `CARD`, in the shape the `tool-finished` event has always carried. */
+const CARD_PARSED = {
+  id: "call-1",
+  name: "search_knowledge_base",
+  ok: true,
+  result: CARD.result,
+  evidence: CARD.evidence,
+  sound: undefined,
+  raw: CARD,
 };
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -50,7 +74,49 @@ describe("a text turn", () => {
       sessionId: "sess-1",
       toolsUsed: ["search_knowledge_base"],
       evidence: OK.evidence,
+      toolEvents: [CARD_PARSED],
     });
+  });
+
+  it("parses the turn's tool cards into the shape tool-finished has always carried", async () => {
+    // The gateway returns `tool_events` — the structured per-tool cards, in the SAME
+    // envelope the voice pipeline ships on the data channel — and this SDK dropped
+    // them, so no artifact could ever render on the text widget: `tools_used` names
+    // what ran and carries none of what it produced. One parser (`parseToolEvent`)
+    // reads both doors, so a card renderer needs no second branch.
+    const fetchImpl = vi.fn(async () => jsonResponse(OK));
+    const c = new TextChannel("https://gw.test/x", "tok", "sess-1", fetchImpl);
+    const turn = await c.send("refund policy?");
+    expect(turn.toolEvents).toEqual([CARD_PARSED]);
+  });
+
+  it("skips tool_events elements that aren't result cards, rather than throwing", async () => {
+    // Forgiving on purpose, like the voice parser: these envelopes gain fields as the
+    // platform grows, and a widget that throws on an unknown one is worse than a
+    // widget that ignores it. Today the gateway only ever puts `phase:"result"` cards
+    // in this array; anything else is skipped, never rendered wrong.
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({
+        ...OK,
+        tool_events: [
+          { kind: "tool", phase: "started", function_name: "x" }, // not a card
+          "garbage",
+          null,
+          CARD,
+        ],
+      }),
+    );
+    const c = new TextChannel("https://gw.test/x", "tok", "sess-1", fetchImpl);
+    const turn = await c.send("hi");
+    expect(turn.toolEvents).toEqual([CARD_PARSED]);
+  });
+
+  it("answers an empty toolEvents for a gateway that doesn't send the field yet", async () => {
+    const { tool_events: _omitted, ...older } = OK;
+    const fetchImpl = vi.fn(async () => jsonResponse(older));
+    const c = new TextChannel("https://gw.test/x", "tok", "sess-1", fetchImpl);
+    const turn = await c.send("hi");
+    expect(turn.toolEvents).toEqual([]);
   });
 
   it("never sends a conversation_id, because nothing reads one", async () => {
@@ -251,6 +317,28 @@ describe("sendText on the agent", () => {
     // The mint's session id — the key that resumes — NOT the conversation row id.
     expect(agent.textThread).toBe("sess-1");
     expect(turn?.conversationId).toBe("conv-1");
+  });
+
+  it("re-emits each tool card as tool-finished, before the reply lands", async () => {
+    // The same card path as voice: whatever a page renders for a spoken booking, it
+    // renders for a typed one with no second code path. Cards precede the transcript
+    // because that is the order a live call delivers them in — the tool comes back,
+    // THEN the agent narrates it.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) =>
+        jsonResponse(String(input).includes("chat/turn") ? OK : mint),
+      ),
+    );
+    const agent = new WhissleAgent({ apiKey: "wpk_x", agentId: "a", baseUrl: "https://gw.test/bot" });
+    const order: Array<[string, unknown]> = [];
+    agent.on("tool-finished", (card) => order.push(["tool-finished", card]));
+    agent.on("agent-transcript", (t) => order.push(["agent-transcript", t]));
+    await agent.sendText("book it");
+    expect(order).toEqual([
+      ["tool-finished", CARD_PARSED],
+      ["agent-transcript", OK.reply],
+    ]);
   });
 
   it("remembers a thread to resume without minting a session to hold it", async () => {

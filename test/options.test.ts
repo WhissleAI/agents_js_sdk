@@ -110,10 +110,132 @@ describe("credentials", () => {
     await expect(agent.start()).rejects.toThrow(/didn't issue a session token/);
   });
 
-  it("explains a 403 as an origin-allowlist problem", async () => {
+  it("explains a 403 as an origin-allowlist problem when the gateway says nothing", async () => {
     routeFetch({ "/bot/api/embed/session-token": () => jsonResponse({}, 403) });
     const agent = new TestAgent({ apiKey: "wpk_abc", agentId: "a", baseUrl: LIVE });
     await expect(agent.start()).rejects.toThrow(/isn't allowed to embed/);
+  });
+
+  it("prefers the gateway's own 403 sentence, which knows WHICH 403 this is", async () => {
+    // The gateway 403s distinctly for a key missing the embed-mint scope, an embed
+    // with no origin allowlist configured at all, and an origin that isn't on it.
+    // Only the last is fixed by adding this origin — hardcoding the allowlist
+    // sentence sent the developer to the wrong settings page for the other two.
+    const detail =
+      "This API key is not allowed to start embedded sessions — it needs the " +
+      "'sessions:write' or 'embed:mint' scope.";
+    routeFetch({ "/bot/api/embed/session-token": () => jsonResponse({ detail }, 403) });
+    const agent = new TestAgent({ apiKey: "wpk_abc", agentId: "a", baseUrl: LIVE });
+    await expect(agent.start()).rejects.toThrow(/embed:mint/);
+    // Still coded for branching — the code stays coarse, the sentence gets precise.
+    await expect(agent.start()).rejects.toMatchObject({ code: "origin-not-allowed", status: 403 });
+  });
+});
+
+describe("what the mint carries along", () => {
+  it("passes the caller's metadata through the mint body, for partner correlation", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return jsonResponse({ token: "t" });
+      }),
+    );
+    await new TestAgent({
+      apiKey: "wpk_abc",
+      agentId: "a",
+      baseUrl: LIVE,
+      metadata: { student_id: "S-42", cohort: 7, pilot: true },
+    }).start();
+    expect(bodies[0].metadata).toEqual({ student_id: "S-42", cohort: 7, pilot: true });
+  });
+
+  it("sends no metadata field at all when the caller has none", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return jsonResponse({ token: "t" });
+      }),
+    );
+    await new TestAgent({ apiKey: "wpk_abc", agentId: "a", baseUrl: LIVE }).start();
+    expect("metadata" in bodies[0]).toBe(false);
+  });
+
+  it("mints and persists one browser_id, stable across agents and page loads", async () => {
+    // The gateway daily-caps the free demo agent per browser as well as per IP —
+    // without a stable id, everyone behind one corporate NAT shares an allowance.
+    // The id must be the SAME on the second mint, or it caps nothing.
+    const store = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+    });
+    const bodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return jsonResponse({ token: "t" });
+      }),
+    );
+    await new TestAgent({ apiKey: "wpk_abc", agentId: "a", baseUrl: LIVE }).start();
+    await new TestAgent({ apiKey: "wpk_abc", agentId: "a", baseUrl: LIVE }).start();
+    expect(typeof bodies[0].browser_id).toBe("string");
+    expect(bodies[1].browser_id).toBe(bodies[0].browser_id);
+    expect(store.get("whissle:browser-id")).toBe(bodies[0].browser_id);
+  });
+
+  it("mints fine with storage unavailable — the id is a convenience, not a gate", async () => {
+    // Some contexts throw on the localStorage ACCESSOR itself (storage disabled,
+    // some private windows). The mint treats an absent id as IP-only capping, so
+    // `undefined` is always a safe answer; an exception here would cost the visitor
+    // the whole session over a rate-limit refinement.
+    vi.stubGlobal("localStorage", {
+      getItem: () => {
+        throw new Error("storage is disabled");
+      },
+      setItem: () => {
+        throw new Error("storage is disabled");
+      },
+    });
+    const bodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return jsonResponse({ token: "t" });
+      }),
+    );
+    const agent = new TestAgent({ apiKey: "wpk_abc", agentId: "a", baseUrl: LIVE });
+    await agent.start();
+    expect("browser_id" in bodies[0]).toBe(false);
+    expect(agent.webrtcCalls).toHaveLength(1);
+  });
+
+  it("exposes the mint's limits, visual and location descriptors on agent.session", async () => {
+    // What the gateway says about the session it just authorized: how long it may
+    // run (a widget draws a countdown from it), whether a camera would reach
+    // anything, and whether the agent may know where the visitor is. Typed so a
+    // caller doesn't re-derive them from `raw` casts.
+    const limits = {
+      max_session_seconds: 120,
+      reason: "demo",
+      end_signal: { type: "demo-limit", reason: "time" },
+    };
+    const visual = { mode: "hybrid", camera: true, vision: true };
+    const location = { tier: "precise", enabled: true, purpose: "to find your nearest branch" };
+    routeFetch({
+      "/bot/api/embed/session-token": () =>
+        jsonResponse({ token: "t", limits, visual, location }),
+    });
+    const agent = new TestAgent({ apiKey: "wpk_abc", agentId: "a", baseUrl: LIVE });
+    await agent.start();
+    expect(agent.session?.limits).toEqual(limits);
+    expect(agent.session?.visual).toEqual(visual);
+    expect(agent.session?.location).toEqual(location);
   });
 });
 

@@ -4,6 +4,63 @@ All notable changes to `@whissle/agents`. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html); while the major
 version is `0`, a minor bump may carry a breaking change and will say so here.
 
+## 0.6.0 — 2026-09-01
+
+Embed parity, round two — the gaps between what the gateway says and what this
+SDK let you hear. Everything is additive; nothing existing changes shape.
+
+### Added
+
+- **Tool cards on typed turns.** The embed chat endpoint returns `tool_events` —
+  the structured per-tool cards, in the *same* `{kind:"tool", phase:"result", …}`
+  envelope the voice pipeline ships on the data channel — and this SDK dropped
+  them, so no artifact could ever render on the text widget: `tools_used` named
+  what ran and carried none of what it produced. `TextTurn` now carries them as
+  `toolEvents` (parsed into `ToolFinished`, the `tool-finished` payload shape),
+  and `sendText` **re-emits each one as a `tool-finished` event** before the
+  `agent-transcript`, so a card renderer wired for voice lights up for typed
+  turns with no second code path. No earcon and no `thinking` edge on this path,
+  deliberately — both exist to explain a silence that is still happening.
+- **`session.limits`** — how long this session may run and why
+  (`max_session_seconds`, `reason: "demo" | "public"`, and the `end_signal`
+  envelope the pipeline sends before hanging up). Every anonymous embed session
+  has a real ceiling, and a widget that didn't know simply went silent
+  mid-sentence at exactly the cap — which reads as the agent freezing, not the
+  free session ending. The ready-made widget now draws a **countdown** in the
+  header and an **end-card** in the log, driven by the mint and confirmed by the
+  existing `demo-limit` event; the local clock is only the backstop for that
+  envelope never arriving.
+- **`session.visual` and `session.location`** — typed descriptors for what the
+  agent can see and whether it may know where the visitor is. A keyframe sent to
+  a non-hybrid agent is accepted and dropped without a word, and a GPS prompt for
+  a tier that can't hold a fix is a permission dialog for nothing — these say so
+  *before* you offer a button. The `agent.send("location", { lat, lon, … })` door
+  the bot has ingested all along is now documented in the README.
+- **`metadata`** on `WhissleAgentOptions` — your own identifiers for the session
+  (`{ student_id: "…" }`), sent with the mint, echoed back, and stamped onto the
+  session record, so correlating a Whissle session to your user is a lookup
+  instead of "list the agent's calls and match on timestamp".
+- **`browser_id`** — a stable, anonymous per-visitor id (random, persisted in
+  `localStorage`, derived from nothing about the visitor), sent with the mint.
+  The gateway uses it for exactly one thing: the free landing demo's daily cap,
+  per browser as well as per IP — without it, everyone behind one corporate NAT
+  shares an allowance. Storage unavailable degrades silently to IP-only capping,
+  never to a failed mint.
+
+### Fixed
+
+- **A 403 from the mint always blamed the origin allowlist.** The gateway 403s
+  distinctly for a key missing the embed-mint scope, an embed with no allowlist
+  configured at all, and an origin that isn't on it — and only the last is fixed
+  by adding this origin. The server's own `detail` is now preferred; the
+  allowlist sentence (with the origin to add) remains the fallback for a gateway
+  that sent none.
+
+### Testing
+
+267 cases across 17 files (up from 245). `check:readme` still compiles every
+README snippet under `--strict`.
+
 ## 0.5.0 — 2026-08-13
 
 An embedded agent got a strictly worse experience than the one on whissle.ai, and
