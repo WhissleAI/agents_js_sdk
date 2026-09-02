@@ -1,4 +1,5 @@
 import { normalizeAvatar } from "./avatar";
+import type { GestureEvent } from "./gestures";
 import type { Affordance, AffordanceResolution, ToolFinished } from "./tool-events";
 import {
   WhissleAgent,
@@ -81,11 +82,18 @@ const CSS = `
 .wa-act.fill{background:var(--wa-accent);border-color:var(--wa-accent);color:#fff}
 .wa-act:disabled{opacity:.5;cursor:default}
 .wa-resolved{display:block;margin-top:8px;font-size:12px;color:#6b7a70}
+/* The gesture-armed chip. VISIBLE arming is part of the contract: a card a 👍
+   could fire must say so, and a paused/fired engine must look different from an
+   armed one. Removed with the buttons when the card resolves. */
+.wa-chip{display:inline-block;margin-top:6px;font-size:11px;color:#6b7a70;
+ border:1px dashed #d6ded5;border-radius:8px;padding:3px 8px}
+.wa-chip.fired{border-style:solid;color:#14201a}
 @media(prefers-color-scheme:dark){.wa-w{background:#151e19;border-color:#26302a;color:#eaf1ea}
  .wa-hd,.wa-ft,.wa-think{border-color:#26302a}.wa-agent{background:#1b241f}
  .wa-icon,.wa-say{background:#151e19;border-color:#26302a;color:#a7b5ab}
  .wa-card{background:#1b241f}.wa-act{background:#151e19;border-color:#26302a;color:#a7b5ab}
- .wa-act.fill{background:var(--wa-accent);border-color:var(--wa-accent);color:#fff}}
+ .wa-act.fill{background:var(--wa-accent);border-color:var(--wa-accent);color:#fff}
+ .wa-chip{border-color:#26302a}.wa-chip.fired{color:#eaf1ea}}
 `;
 
 /** Render a ready-made voice widget into `target`. Returns the WhissleAgent so
@@ -210,6 +218,15 @@ export function mount(target: string | HTMLElement, options: WidgetOptions): Whi
           });
           acts.appendChild(btn);
         }
+        // The gesture-armed chip, when the engine says a gesture could touch
+        // THIS card. Lives in the same repaint as the buttons, so resolution
+        // removes both at once.
+        if (v.chip) {
+          const chip = document.createElement("span");
+          chip.className = v.chip.state === "fired" ? "wa-chip fired" : "wa-chip";
+          chip.textContent = v.chip.line;
+          acts.appendChild(chip);
+        }
       };
       paint();
       cardRows.push({ row, paint });
@@ -223,6 +240,18 @@ export function mount(target: string | HTMLElement, options: WidgetOptions): Whi
           c.paint();
           break;
         }
+      }
+    })
+    // The gesture engine's edges (only ever emitted with `gestures: true`),
+    // rendered as a chip on the FOCUSED card. The engine arms only while exactly
+    // one card holds unresolved affordances, so "focused" is that card — mirrored
+    // here rather than trusted blindly: with any other count, no chip at all.
+    .on("gesture", (payload) => {
+      const g = payload as GestureEvent;
+      const open = cardRows.filter((c) => c.row.view.state !== "resolved");
+      const focused = open.length === 1 ? open[0] : null;
+      for (const c of cardRows) {
+        if (c.row.setGesture(c === focused ? g : null)) c.paint();
       }
     });
 
@@ -438,9 +467,22 @@ export interface AffordanceButtonView {
   filled: boolean;
 }
 
+/** The gesture chip on the focused card, when the engine is watching it. */
+export interface GestureChipView {
+  state: "armed" | "paused" | "fired";
+  /** Ready-made copy, glyphs included ("✋ gesture armed · 👍 approve · 👎 reject"). */
+  line: string;
+}
+
 /** What the card's action row should render right now. */
 export type AffordanceRowView =
-  | { state: "open" | "fired"; buttons: AffordanceButtonView[]; disabled: boolean }
+  | {
+      state: "open" | "fired";
+      buttons: AffordanceButtonView[];
+      disabled: boolean;
+      /** Present only while the gesture engine is armed on this card. */
+      chip?: GestureChipView;
+    }
   | { state: "resolved"; line: string };
 
 /**
@@ -456,11 +498,14 @@ export type AffordanceRowView =
 export class AffordanceRow {
   private fired = false;
   private line: string | null = null;
+  private gestureState: GestureChipView["state"] | null = null;
+  private gestureName: string | null = null;
 
   constructor(private readonly affordances: Affordance[]) {}
 
   get view(): AffordanceRowView {
     if (this.line !== null) return { state: "resolved", line: this.line };
+    const chip = gestureChip(this.gestureState, this.gestureName);
     return {
       state: this.fired ? "fired" : "open",
       disabled: this.fired,
@@ -469,7 +514,30 @@ export class AffordanceRow {
         label: a.label,
         filled: a.kind === "approve" || (a.kind === "choice" && a.primary === true),
       })),
+      ...(chip ? { chip } : {}),
     };
+  }
+
+  /**
+   * The gesture engine's read on THIS card — `null` (or a `"disarmed"` event)
+   * takes the chip away. A resolved row never shows one: the contract's visible
+   * arming ends with the affordances it advertised. Returns `true` when the view
+   * changed and is worth repainting.
+   */
+  setGesture(event: { name?: string | null; armed_state?: string } | null): boolean {
+    const state =
+      event !== null &&
+      this.line === null &&
+      (event.armed_state === "armed" ||
+        event.armed_state === "paused" ||
+        event.armed_state === "fired")
+        ? event.armed_state
+        : null;
+    const name = state === "fired" ? (event?.name ?? null) : null;
+    if (state === this.gestureState && name === this.gestureName) return false;
+    this.gestureState = state;
+    this.gestureName = name;
+    return true;
   }
 
   /** A tap. Returns what to fire — or `null` when the row is already spent, which is
@@ -501,8 +569,27 @@ export class AffordanceRow {
     );
     if (!mine) return false;
     this.line = resolvedLine(r.disposition);
+    // Resolution removes the chip with the buttons — the visible arming ends here.
+    this.gestureState = null;
+    this.gestureName = null;
     return true;
   }
+}
+
+/**
+ * The chip's copy, by engine state. Armed names all three meanings — a visitor
+ * who has never met a gesture-armed card must be able to read what their hands
+ * can now do. Fired shows the glyph of the gesture that did it.
+ */
+function gestureChip(
+  state: GestureChipView["state"] | null,
+  name: string | null,
+): GestureChipView | null {
+  if (!state) return null;
+  if (state === "paused") return { state, line: "✋ paused" };
+  if (state === "fired")
+    return { state, line: `${name === "Thumb_Down" ? "👎" : "👍"} firing…` };
+  return { state, line: "✋ gesture armed · 👍 approve · 👎 reject" };
 }
 
 /** The resolved state, as one line. Total over dispositions this build has never
@@ -546,5 +633,6 @@ export const WIDGET_INTERNALS = {
   sessionEnded,
   resolvedLine,
   cardTitle,
+  gestureChip,
   AffordanceRow,
 };
