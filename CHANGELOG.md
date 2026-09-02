@@ -4,6 +4,57 @@ All notable changes to `@whissle/agents`. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html); while the major
 version is `0`, a minor bump may carry a breaking change and will say so here.
 
+## 0.7.0 — 2026-09-01
+
+Card affordances, P0. Some tools don't act — they **prepare**: the drafted email,
+the tentative booking, a side effect parked in the pending-actions queue waiting
+for someone to say yes. The card now carries the choices, and this SDK can render
+and fire them. Everything is additive; a card without affordances is exactly what
+it always was.
+
+### Added
+
+- **`ToolFinished.affordances`** — the card's actionable buttons
+  (`{ id, label, kind: "approve" | "reject" | "choice", actionId, primary? }`),
+  parsed on **both** doors — the voice data channel and `sendText`'s
+  `turn.toolEvents` — by the same code. Read forgivingly: an entry that cannot be
+  fired or named, or whose `kind` this build has never heard of, is skipped
+  rather than rendered broken. Absent/empty stays `undefined`, so "has
+  affordances" is one truthiness check.
+- **`affordance-resolved`** — a new event: a card's pending action was resolved
+  (approved or rejected) from **any** surface — a tap here, a spoken
+  confirmation, the operator's own console. Carries an `AffordanceResolution`
+  (`{ id?, affordanceId?, actionId?, disposition?, status?, source?,
+  alreadyResolved?, raw }`). Drive card buttons off this event, not off the local
+  tap handler, or a firing from another surface leaves the card offering a
+  choice that no longer exists. The raw envelope still reaches `server-message`,
+  like every other family on the channel.
+- **`agent.fireAffordance({ actionId, affordanceId, disposition, source? })`** —
+  one call, routed by transport: during a live voice session it goes over the
+  data channel (a `card-action` client message) and resolves on the pipeline's
+  own confirmation (rejecting after 10 s rather than hanging forever — the
+  channel drops rather than throws); with no session up it POSTs the token-authed
+  `/api/embed/card-action` door and resolves with the mirrored resolution.
+  **A 409 resolves, it does not reject**: an affordance fires once and races are
+  settled server-side (first write wins), so "someone got there first" comes back
+  as the standing state flagged `alreadyResolved: true` — render it, never toast
+  it. Every successful firing is also emitted as `affordance-resolved`, so a card
+  renderer needs exactly one code path whatever fired it.
+- **The ready-made widget renders them.** A card with affordances appears in the
+  log with its buttons — approve filled with the accent, reject quiet, a primary
+  choice filled among quiet ones. A tap disables the row immediately (a
+  double-tap must not fire twice), the resolution swaps the buttons for a line
+  ("Approved · sent" / "Discarded"), a resolution from any other surface does the
+  same, and a firing that failed to *send* re-arms the buttons — unless a
+  resolution landed meanwhile, which outranks the delivery failure.
+
+### Testing
+
+293 cases across 18 files (up from 267). The new ones pin the affordance parse on
+both doors, both firing routes (envelope and body byte-for-byte), the
+409-is-an-answer rule, and the widget's card state machine. `check:readme` still
+compiles every README snippet under `--strict`.
+
 ## 0.6.0 — 2026-09-01
 
 Embed parity, round two — the gaps between what the gateway says and what this

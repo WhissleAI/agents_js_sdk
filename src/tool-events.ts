@@ -1,12 +1,16 @@
 // The agent's tool calls, as the pipeline reports them.
 //
 // When an agent looks something up, books something, or sends something, the pipeline
-// narrates it to the client on the `server-message` channel. Three phases, all with
+// narrates it to the client on the `server-message` channel. Four phases, all with
 // `kind: "tool"` (services/tool_events.py):
 //
 //   {kind:"tool", phase:"started",  tool_call_id, function_name, arguments, sound?}
 //   {kind:"tool", phase:"progress", tool_call_id, function_name, display, data}
-//   {kind:"tool", phase:"result",   tool_call_id, function_name, ok, result, evidence?, sound?}
+//   {kind:"tool", phase:"result",   tool_call_id, function_name, ok, result, evidence?, sound?, affordances?}
+//   {kind:"tool", phase:"action",   tool_call_id, affordance_id, action_id, disposition, status, source}
+//
+// The last is not a tool running — it is a card's pending action being RESOLVED
+// (approved or rejected), from whatever surface fired it. See `Affordance`.
 //
 // Until 0.5.0 this SDK forwarded all three untouched as `server-message` and did
 // nothing with them, which had two consequences an embedder could not fix from outside:
@@ -46,6 +50,67 @@ export interface ToolProgress {
   raw: unknown;
 }
 
+/**
+ * One actionable button on a tool-result card.
+ *
+ * A tool that DEFERS its side effect — the drafted email, the tentative booking —
+ * parks it as a pending action and describes the choices on the card itself. Each
+ * affordance is one of those choices. Fire it with `agent.fireAffordance(…)` (or
+ * let the ready-made widget do it); the outcome comes back as the
+ * `affordance-resolved` event, whichever surface fired it.
+ *
+ * A card with no `affordances` is exactly what it always was: render-only.
+ */
+export interface Affordance {
+  /** Unique within the session, e.g. `"aff_…"`. What to pass as `affordanceId`. */
+  id: string;
+  /** Display text, written by the platform to be shown as-is ("Send email"). */
+  label: string;
+  /**
+   * `"approve"` fires the pending action, `"reject"` discards it, `"choice"` is
+   * pick-one — several `choice` affordances on a card, and tapping one approves
+   * that variant.
+   */
+  kind: "approve" | "reject" | "choice";
+  /** The pending actions-queue row this fires. What to pass as `actionId`. */
+  actionId: string;
+  /** At most one per card — the default target for a voice or gesture confirmation.
+   *  Never set on a `reject`. */
+  primary?: boolean;
+  /** The untouched wire object. */
+  raw: unknown;
+}
+
+/**
+ * A card's pending action was resolved. Payload of the `affordance-resolved` event.
+ *
+ * This arrives on the live channel from ANY surface — a tap here, a spoken
+ * confirmation, the operator's own inbox — which is why a card's buttons must be
+ * driven by this event, not by the local tap handler alone.
+ */
+export interface AffordanceResolution {
+  /** The tool call whose card this resolves — matches `ToolFinished.id`. */
+  id?: string;
+  /** Which affordance fired. */
+  affordanceId?: string;
+  /** The actions-queue row that was resolved. */
+  actionId?: string;
+  /** `"approve"` or `"reject"` — what happened to it. */
+  disposition?: string;
+  /** The queue row's status after the firing (e.g. `"approved"`, `"rejected"`). */
+  status?: string;
+  /** Which modality fired it: `"tap"`, `"voice"` or `"gesture"`. */
+  source?: string;
+  /**
+   * Set by `fireAffordance` when the server answered 409: someone — or some other
+   * surface — resolved this action first, and this is the standing state, not an
+   * error. Render it exactly as if the resolution had been yours.
+   */
+  alreadyResolved?: boolean;
+  /** The untouched envelope (or, from `fireAffordance`, the HTTP response body). */
+  raw: unknown;
+}
+
 /** A tool that has come back. Payload of the `tool-finished` event. */
 export interface ToolFinished {
   id?: string;
@@ -61,6 +126,10 @@ export interface ToolFinished {
   /** Set only on FAILURE (`error_0`). Success gets no cue: the agent is about to say
    *  the answer, so a success chime on every call would turn the bank into wallpaper. */
   sound?: string;
+  /** The card's actionable buttons, when the tool deferred its side effect into the
+   *  pending-actions queue. Absent on a render-only card — which is every card that
+   *  existed before these did. */
+  affordances?: Affordance[];
   raw: unknown;
 }
 
@@ -87,10 +156,38 @@ export interface ThinkingState {
 export type ToolEvent =
   | { phase: "started"; data: ToolStarted }
   | { phase: "progress"; data: ToolProgress }
-  | { phase: "result"; data: ToolFinished };
+  | { phase: "result"; data: ToolFinished }
+  | { phase: "action"; data: AffordanceResolution };
 
 function str(v: unknown): string | undefined {
   return typeof v === "string" && v ? v : undefined;
+}
+
+const AFFORDANCE_KINDS = ["approve", "reject", "choice"] as const;
+
+/**
+ * The card's buttons, read forgivingly — like everything else on this wire.
+ *
+ * An entry missing its `id`, `label` or `action_id` cannot be fired or named, so it
+ * is skipped rather than rendered broken; so is a `kind` this build has never heard
+ * of, because a button whose semantics we don't know must not be drawn as one we do.
+ * `undefined` (never `[]`) when nothing renderable remains, so "has affordances" is
+ * one truthiness check.
+ */
+function parseAffordances(raw: unknown): Affordance[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: Affordance[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const a = item as Record<string, unknown>;
+    const id = str(a.id);
+    const label = str(a.label);
+    const actionId = str(a.action_id);
+    const kind = AFFORDANCE_KINDS.find((k) => k === a.kind);
+    if (!id || !label || !actionId || !kind) continue;
+    out.push({ id, label, kind, actionId, ...(a.primary === true ? { primary: true } : {}), raw: item });
+  }
+  return out.length ? out : undefined;
 }
 
 /**
@@ -127,6 +224,20 @@ export function parseToolEvent(message: unknown): ToolEvent | null {
           result: m.result,
           evidence: Array.isArray(m.evidence) ? m.evidence : undefined,
           sound: str(m.sound),
+          affordances: parseAffordances(m.affordances),
+          raw: message,
+        },
+      };
+    case "action":
+      return {
+        phase: "action",
+        data: {
+          id,
+          affordanceId: str(m.affordance_id),
+          actionId: str(m.action_id),
+          disposition: str(m.disposition),
+          status: str(m.status),
+          source: str(m.source),
           raw: message,
         },
       };
