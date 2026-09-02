@@ -10,6 +10,11 @@ export {
 } from "./WhissleAgent";
 export { type AvatarAudioStats, type AvatarOptions } from "./avatar";
 export { type EarconCategory, type EarconOptions } from "./earcons";
+export {
+  type GestureArmedState,
+  type GestureEvent,
+  type GestureName,
+} from "./gestures";
 export { checkMicrophone, listMicrophones, type MicProblem } from "./mic";
 export {
   type LiveSignal,

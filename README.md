@@ -362,6 +362,7 @@ to go silent for seconds at a time with no explanation:
 | `tool-progress` | `ToolProgress` — `{ id?, name?, display?, data?, raw }` | an interim line from inside a long tool ("Reading source 2 of 3…"). `display` is written to be shown as-is. |
 | `tool-finished` | `ToolFinished` — `{ id?, name?, ok?, result?, evidence?, sound?, affordances?, raw }` | it came back. `ok` is `undefined` — not `false` — when the tool didn't say, so its success is genuinely unknown. `evidence` carries citations when it answered from a document. `sound` is set **only on failure**: the agent is about to speak the answer, so a chime on every success would turn the bank into wallpaper. `affordances` is the card's actionable buttons, when the tool deferred its side effect — see [Card affordances](#card-affordances). |
 | `affordance-resolved` | `AffordanceResolution` — `{ id?, affordanceId?, actionId?, disposition?, status?, source?, alreadyResolved?, raw }` | a card's pending action was resolved — approved or rejected — from **any** surface: a tap here, a spoken confirmation, the operator's console. Drive card buttons off this, not off your tap handler. See [Card affordances](#card-affordances). |
+| `gesture` | `GestureEvent` — `{ name, armed_state }` | the gesture engine moved (only ever with `gestures: true`): `"armed"` (👍/👎 could fire the focused card — show an indicator), `"paused"` (a held ✋, 30 s), `"fired"` (`name` says which gesture), `"disarmed"`. See [Gesture input](#gesture-input-opt-in). |
 | `gist` | `string` | a one-line caption of the reply being spoken right now. Only on agents configured to emit one. |
 | `user-metadata` | `UserMetadata` | the live acoustic read of the caller — see [Emotion](#emotion-and-the-neutral-problem) before you render it. **Not emitted at all** when neither an emotion nor an intent survived the read; the raw payload still reaches `server-message`. |
 | `signal` | `LiveSignal` | one event from the pipeline's live signal stream (barge-in, endpointing, language switches, entities, flow state). The stream is versioned and additive-only, so a future schema arrives as the same fields plus ones this build ignores — `signal.version` if you care, `signal.raw` for the rest. |
@@ -592,6 +593,74 @@ double-tap must not fire twice), the resolution swaps the buttons for a line
 surface does the same. A firing that fails to *send* re-arms the buttons; a
 firing that was merely beaten renders the winner's outcome.
 
+### Gesture input (opt-in)
+
+The third modality: fire a card's affordances with your hands. **Exactly three
+gestures, and no free-form vocabulary** — 👍 fires the focused card's *primary*
+approve, 👎 fires its reject, and a held ✋ pauses gesture firing for 30 seconds
+(a hold, never a disposition).
+
+```ts
+import { WhissleAgent, type GestureEvent } from "@whissle/agents";
+
+const voice = new WhissleAgent({
+  apiKey: "wpk_…",
+  agentId: AGENT_ID,
+  gestures: true, // default false — nothing gesture-shaped runs without it
+  gestureAssetsUrl: "/vendor/mediapipe-gestures", // YOUR host — no CDN default
+});
+
+voice.on("gesture", (payload) => {
+  const g = payload as GestureEvent;
+  // g.armed_state: "armed" | "paused" | "fired" | "disarmed"
+  // g.name: "Thumb_Up" | "Thumb_Down" | "Open_Palm" | null
+  show(`gestures: ${g.armed_state}${g.name ? ` (${g.name})` : ""}`);
+});
+```
+
+**On-device only.** Recognition runs in the page (MediaPipe's gesture
+recognizer): no frame, hand landmark, or gesture datum ever leaves the browser,
+and the camera stream is never attached to the session's transport. The only
+thing that goes anywhere is the same firing a tap would have sent — through
+`fireAffordance`, attributed `source: "gesture"` in the actions queue, visible
+in `sessions trace` like every other modality.
+
+**When it arms.** A gesture can approve a side effect without a tap or a word,
+so every gate below must hold at once — and the arming is *visible* (the
+widget's chip, or your own indicator off the `gesture` event) whenever a gesture
+could fire:
+
+- `gestures: true` — the integrator opted in.
+- The session mint's `visual` descriptor allows a camera
+  (`agent.session?.visual?.camera`). An audio-only session **never** arms.
+- A camera track is actually live — the SDK opens its own low-res stream, and
+  the track dying disarms.
+- **Exactly one** card holds unresolved affordances. That card is the focused
+  one; with none, or with two, nothing arms — "which card did that thumbs-up
+  mean?" must never be a question.
+
+A firing needs two consecutive samples at ≥ 0.75 confidence, ~300 ms apart — a
+deliberate ~600 ms hold, not a hand passing the lens. Sampling skips while the
+tab is hidden and stops entirely whenever disarmed. Ambiguity never fires: a
+thumbs-up against a card with no single approve target (no `primary`, several
+candidates) does nothing, as does a thumbs-down against several rejects.
+
+**The two dependencies are yours to provide, deliberately.**
+[`@mediapipe/tasks-vision`](https://www.npmjs.com/package/@mediapipe/tasks-vision)
+is an *optional* peer dependency — install it and your bundler resolves the lazy
+`import()`; without it (or with a CSP that blocks the chunk) the SDK warns once
+on the console and gestures no-op. Gestures never break a session. And
+`gestureAssetsUrl` must point at assets **you host** — the engine loads
+`<url>/wasm` (the directory) and `<url>/gesture_recognizer.task` from there,
+with no third-party CDN default: unset means gestures stay off, with one warn.
+The `<script>`-tag builds don't bundle the recognizer; gestures need the npm
+package.
+
+**In the ready-made widget**, the focused card wears a chip while a gesture
+could touch it — "✋ gesture armed · 👍 approve · 👎 reject", turning "✋ paused"
+during a hold and "👍 firing…" when one fires — and the chip leaves with the
+buttons when the card resolves.
+
 ## Errors
 
 `error` carries the sentence it always has, plus a second argument you can branch
@@ -808,6 +877,8 @@ new WhissleAgent({
   earcons: true,         // true | false | { enabled, volume, bankUrl }
   micPreflight: true,    // check the mic before connecting
   metadata: { student_id: "S-42" }, // your own ids, stamped onto the session
+  gestures: false,       // opt into 👍/👎/✋ card input — see Gesture input
+  gestureAssetsUrl: "/vendor/mediapipe-gestures", // your own asset host, required for gestures
 });
 ```
 
@@ -829,7 +900,9 @@ Defaults: `baseUrl` is `https://aws-gateway-backend.whissle.ai/bot` (**both the
 `aws-` prefix and the `/bot` suffix are load-bearing** — see [Base
 URL](#base-url)); `transport` is `"auto"`; `earcons` and `micPreflight` are on;
 `iceServers` falls back to three public STUN servers unless the mint or you say
-otherwise. `avatar` is off.
+otherwise. `avatar` is off. `gestures` is off, and stays off without a
+`gestureAssetsUrl` (there is no CDN default) — see [Gesture
+input](#gesture-input-opt-in).
 
 Read-only: `agent.state`, `agent.transport`, `agent.session` (what the mint said —
 agent name, greeting, TTL, `text_enabled`, plus the `limits`, `visual` and
@@ -952,7 +1025,7 @@ in Node (ESM or CJS) is safe. Note the SDK still needs a browser to actually
 ## Testing
 
 ```bash
-npm test              # 293 cases across 18 files, Vitest, no browser needed
+npm test              # 332 cases across 19 files, Vitest, no browser needed
 npm run typecheck     # src and tests, --strict, --skipLibCheck false
 npm run check:readme  # every TypeScript snippet in this file, compiled against src/
 ```
@@ -965,7 +1038,12 @@ outbound `client-message` envelope, the earcon clip-name guard and bank fallback
 the tool-event parse, the thinking bookkeeping, the `NEUTRAL` suppression, the
 signal envelope's forward compatibility, the text channel's thread key, and the
 card-affordance surface (the parse on both doors, both firing routes, the
-409-is-an-answer rule, and the widget's card state machine).
+409-is-an-answer rule, and the widget's card state machine). Gesture input is
+covered against a fake recognizer and camera: every arming gate individually,
+confidence + dwell, the closed three-gesture vocabulary, ambiguity-never-fires,
+the open-palm hold, the firing envelope (`source: "gesture"`), the
+graceful no-op when the optional dependency or its assets are missing, and the
+chip state machine.
 
 `npm run check:readme` exists because this README is API surface: a snippet a
 reader pastes first and that does not compile is a bug report from someone who
@@ -1004,6 +1082,10 @@ a published one):
 - **Microphone device switching.** `listMicrophones()` and `setMicrophone()` are
   never exercised against real devices — `getUserMedia` and `enumerateDevices`
   are stubbed throughout.
+- **Real gesture recognition.** The engine's gates, dwell, semantics and no-op
+  paths run against a fake recognizer and a fake camera. MediaPipe's actual
+  model — whether a thumbs-up in your lighting scores 0.75 — and the camera
+  `getUserMedia` path are browser questions the suite cannot ask.
 - **The mobile playout graph.** The node graph and its values are pinned against a
   fake context. Whether it is actually louder on an iPhone is a phone question —
   `window.__whissleAudioBoost()` reports the live measurement from the device.

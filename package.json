@@ -62,6 +62,14 @@
     "livekit-client": "^2.21.0",
     "simli-client": "^3.0.2"
   },
+  "peerDependencies": {
+    "@mediapipe/tasks-vision": ">=0.10.0"
+  },
+  "peerDependenciesMeta": {
+    "@mediapipe/tasks-vision": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@livekit/throws-transformer": "^0.1.8",
     "@types/sdp-transform": "^3.0.0",

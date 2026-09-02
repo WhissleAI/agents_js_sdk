@@ -8,6 +8,7 @@ import {
   type AvatarOptions,
 } from "./avatar";
 import { EarconPlayer, type EarconOptions } from "./earcons";
+import { GestureEngine, type GestureEngineHooks } from "./gestures";
 import { LiveKitSession, type LiveKitConnectInfo, type SessionCallbacks } from "./livekit";
 import { checkMicrophone, listMicrophones, type MicProblem } from "./mic";
 import { BoostedPlayout } from "./mobile-audio";
@@ -208,6 +209,26 @@ export interface WhissleAgentOptions {
    * YOUR backend does the minting and passes its own `metadata` there.
    */
   metadata?: Record<string, string | number | boolean>;
+  /**
+   * Opt into gesture input for card affordances. Default `false` — nothing about
+   * gestures runs, loads, or asks for a camera unless you turn this on.
+   *
+   * Exactly three gestures, on-device (no frame or gesture datum ever leaves the
+   * browser): 👍 fires the focused card's primary approve, 👎 its reject, and a
+   * held ✋ pauses gesture firing for 30 s (never a disposition). Only armed when
+   * the mint's `visual` descriptor allows a camera, a camera track is actually
+   * live, and exactly ONE card holds unresolved affordances — an audio-only
+   * session never arms. Requires `gestureAssetsUrl`, and the optional peer
+   * dependency `@mediapipe/tasks-vision` installed. See `./gestures`.
+   */
+  gestures?: boolean;
+  /**
+   * Where YOUR app hosts MediaPipe's gesture assets: the engine loads
+   * `<url>/wasm` (the directory) and `<url>/gesture_recognizer.task` from here.
+   * There is deliberately no third-party CDN default — unset means gestures stay
+   * off, with one console.warn saying so.
+   */
+  gestureAssetsUrl?: string;
 }
 
 /** Where the stable per-visitor id lives across page loads. */
@@ -302,6 +323,14 @@ export type WhissleEvent =
    * own tap handler, so a firing from another surface reaches the card too.
    */
   | "affordance-resolved"
+  /**
+   * The gesture engine moved (only with `gestures: true`). Carries a
+   * `GestureEvent` — `{ name, armed_state }` — so a host app can render its own
+   * arming indicator: `"armed"` (👍/👎 could fire the focused card), `"paused"`
+   * (a held ✋ — 30 s), `"fired"` (`name` says which gesture), `"disarmed"`.
+   * The ready-made widget renders these as a chip on the focused card.
+   */
+  | "gesture"
   /**
    * One boolean for "the agent is working, that's why it's quiet". Collapses however
    * many tools are in flight into the single thing a UI needs. This is what the
@@ -619,6 +648,8 @@ export class WhissleAgent {
   /** Per-instance mobile playout. NOT module state: two agents on one page each
    *  own their graph, so one stopping cannot mute the other. */
   private playout = new BoostedPlayout();
+  /** Gesture input for card affordances. `null` unless `gestures: true`. */
+  private gestureEngine: GestureEngine | null = null;
 
   constructor(options: WhissleAgentOptions) {
     if (!options?.apiKey && !options?.sessionToken && !options?.getToken) {
@@ -657,6 +688,37 @@ export class WhissleAgent {
           ? {}
           : options.earcons,
     );
+    // Gesture input is OPT-IN: without `gestures: true` nothing here exists — no
+    // engine, no listeners, no camera, no module import. With it, the engine is
+    // fed every card and every resolution through the same events an integrator
+    // sees, so both doors (the voice channel and `sendText`'s replayed cards)
+    // reach it with no second code path. The remaining gates — the mint's
+    // `visual` descriptor, a live camera track, exactly one unresolved card —
+    // are the engine's own; see `./gestures`.
+    if (options.gestures) {
+      const engine = new GestureEngine({
+        assetsUrl: options.gestureAssetsUrl,
+        visual: () => this._session?.visual,
+        fire: (o) => this.fireAffordance(o),
+        emit: (e) => this.emit("gesture", e),
+        ...this.gestureHooks(),
+      });
+      this.gestureEngine = engine;
+      this.on("tool-finished", (p) => engine.cardFinished(p as ToolFinished));
+      this.on("affordance-resolved", (p) => engine.cardResolved(p as AffordanceResolution));
+      // The mint (and its `visual` descriptor) lands with the connection — a card
+      // that arrived while a gate was shut gets its re-check here.
+      this.on("connected", () => engine.evaluate());
+    }
+  }
+
+  /**
+   * Test seam: the gesture engine's I/O (the module import, the camera). The
+   * suite runs in Node, where neither exists. Called from the constructor, so an
+   * override must not read instance fields of the subclass.
+   */
+  protected gestureHooks(): GestureEngineHooks {
+    return {};
   }
 
   get state() {
@@ -1793,6 +1855,7 @@ export class WhissleAgent {
    */
   destroy(): void {
     this.stop();
+    this.gestureEngine?.dispose();
     this.handlers.clear();
   }
 
