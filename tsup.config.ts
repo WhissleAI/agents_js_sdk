@@ -72,6 +72,13 @@ export default defineConfig([
         ...options.alias,
         events: require.resolve("events/"),
         util: require.resolve("util/"),
+        // The gesture recognizer is an optional PEER dependency — not installed
+        // here, so an IIFE (which must bundle everything) cannot resolve it.
+        // Alias it to a module that throws, which lands on the engine's own
+        // "didn't load → warn once → no-op" path. npm builds keep the real
+        // dynamic import (peer deps are external there) and resolve it when the
+        // host installed it.
+        "@mediapipe/tasks-vision": require.resolve("./src/vision-unavailable.ts"),
         // The lean global points the renderers at a module that throws a
         // sentence telling you which build to use; the full global bundles the
         // real ones. `external` is not an option here: esbuild has to inline

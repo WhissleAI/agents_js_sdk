@@ -6,11 +6,11 @@ version is `0`, a minor bump may carry a breaking change and will say so here.
 
 ## 0.7.0 — 2026-09-01
 
-Card affordances, P0. Some tools don't act — they **prepare**: the drafted email,
-the tentative booking, a side effect parked in the pending-actions queue waiting
-for someone to say yes. The card now carries the choices, and this SDK can render
-and fire them. Everything is additive; a card without affordances is exactly what
-it always was.
+Card affordances, P0 + P2. Some tools don't act — they **prepare**: the drafted
+email, the tentative booking, a side effect parked in the pending-actions queue
+waiting for someone to say yes. The card now carries the choices, and this SDK
+can render and fire them — by tap, and (opt-in) by gesture. Everything is
+additive; a card without affordances is exactly what it always was.
 
 ### Added
 
@@ -47,13 +47,39 @@ it always was.
   ("Approved · sent" / "Discarded"), a resolution from any other surface does the
   same, and a firing that failed to *send* re-arms the buttons — unless a
   resolution landed meanwhile, which outranks the delivery failure.
+- **Gesture input (P2), opt-in** — `gestures: true` plus `gestureAssetsUrl` arms
+  **exactly three** on-device gestures against the focused card: 👍 fires its
+  `primary` approve (single-unmarked fallback; ambiguity never fires), 👎 its
+  single reject, and a held ✋ pauses gesture firing for 30 s — a hold, never a
+  disposition. Armed only when every gate holds at once: the option, the mint's
+  `visual` descriptor allowing a camera (an audio-only session never arms), a
+  live camera track, and **exactly one** card with unresolved affordances. A
+  firing needs two consecutive samples at ≥ 0.75 confidence (~600 ms dwell,
+  ~300 ms cadence); sampling skips hidden tabs and stops whenever disarmed.
+  Fires through the same `fireAffordance`, attributed `source: "gesture"`.
+  **On-device only**: no frame, landmark, or gesture datum leaves the browser.
+- **`gesture`** — a new event (`GestureEvent` — `{ name, armed_state }`,
+  `armed_state: "armed" | "paused" | "fired" | "disarmed"`), so host apps can
+  render their own arming indicator. The ready-made widget renders it as a chip
+  on the focused card ("✋ gesture armed · 👍 approve · 👎 reject" / "✋ paused" /
+  "👍 firing…"), removed with the buttons when the card resolves.
+- **`@mediapipe/tasks-vision` as an optional peer dependency**, loaded with a
+  lazy `import()` — bundlers resolve it when the host installed it; when the
+  import fails (package absent, CSP) the SDK warns once and gestures no-op:
+  they never break a session. The recognizer assets load from the host's own
+  `gestureAssetsUrl` (`<url>/wasm`, `<url>/gesture_recognizer.task`) — there is
+  deliberately no third-party CDN default, and unset means off-with-a-warn. The
+  `<script>`-tag builds alias the module to a stub that takes the same warn path.
 
 ### Testing
 
-293 cases across 18 files (up from 267). The new ones pin the affordance parse on
+332 cases across 19 files (up from 267). The new ones pin the affordance parse on
 both doors, both firing routes (envelope and body byte-for-byte), the
-409-is-an-answer rule, and the widget's card state machine. `check:readme` still
-compiles every README snippet under `--strict`.
+409-is-an-answer rule, the widget's card state machine — and, for gestures, every
+arming gate individually, confidence + dwell, the closed three-gesture
+vocabulary, ambiguity-never-fires, the open-palm hold, the `source: "gesture"`
+firing envelope, the graceful no-op paths, and the chip state machine.
+`check:readme` still compiles every README snippet under `--strict`.
 
 ## 0.6.0 — 2026-09-01
 
