@@ -16,6 +16,7 @@ import { TextChannel, WhissleTextError, type SendTextOptions, type TextTurn } fr
 import {
   parseToolEvent,
   ThinkingTracker,
+  type AffordanceResolution,
   type ThinkingState,
   type ToolFinished,
   type ToolProgress,
@@ -295,6 +296,13 @@ export type WhissleEvent =
   /** A tool came back — with its result, whether it succeeded, and any citations. */
   | "tool-finished"
   /**
+   * A card's pending action was resolved — approved or rejected — from ANY surface:
+   * a tap here, a spoken confirmation, the operator's own inbox. Carries an
+   * `AffordanceResolution`. Drive the card's buttons off this event, not off your
+   * own tap handler, so a firing from another surface reaches the card too.
+   */
+  | "affordance-resolved"
+  /**
    * One boolean for "the agent is working, that's why it's quiet". Collapses however
    * many tools are in flight into the single thing a UI needs. This is what the
    * dashboard's thinking strip is built on.
@@ -452,6 +460,84 @@ function mintFailure(
         message: detail || `Couldn't start the agent (${status}).`,
       };
   }
+}
+
+/** What `fireAffordance` needs — all of it read straight off the card's `Affordance`. */
+export interface FireAffordanceOptions {
+  /** `Affordance.actionId` — the pending actions-queue row to resolve. */
+  actionId: string;
+  /** `Affordance.id` — which of the card's buttons this is. */
+  affordanceId: string;
+  /** `"approve"` fires the pending action; `"reject"` discards it. A `choice`
+   *  affordance is fired with `"approve"` — tapping a choice approves that variant. */
+  disposition: "approve" | "reject";
+  /** Which modality fired it. Default `"tap"`. */
+  source?: "tap" | "voice" | "gesture";
+}
+
+/** How long the data-channel path waits for the pipeline to confirm a firing before
+ *  giving the promise back. The card itself still resolves if the confirmation is
+ *  merely late — `affordance-resolved` keeps listening. */
+const CARD_ACTION_TIMEOUT_MS = 10_000;
+
+/** Why a card-action firing refused, said so the person reading it can act. */
+function cardActionFailure(
+  status: number,
+  detail: string | undefined,
+): { code: WhissleErrorDetail["code"]; message: string } {
+  switch (status) {
+    case 401:
+      return { code: "expired", message: detail || "This session has expired — start a new one." };
+    case 402:
+      return {
+        code: "no-credit",
+        message: detail || "This agent is out of credit and can't act right now.",
+      };
+    case 403:
+      return {
+        code: "origin-not-allowed",
+        message: detail || "This site isn't allowed to use this agent.",
+      };
+    case 404:
+      // The gateway 404s an action row that belongs to another session — the
+      // token-authed door is scoped to the session that saw the card.
+      return { code: "not-found", message: detail || "That action isn't available to this session." };
+    case 429:
+      return { code: "rate-limited", message: detail || "Too many requests — try again in a moment." };
+    default:
+      return { code: "connection", message: detail || `Couldn't send that action (${status}).` };
+  }
+}
+
+/**
+ * Read a card-action response as an `AffordanceResolution`.
+ *
+ * The gateway mirrors the resolution EVENT on a 200 (`{kind:"tool", phase:"action",
+ * …}`), and a 409's body is the standing state, which some builds send flat
+ * (`{action_id, status, disposition, affordance_id}`). Read both; anything the body
+ * doesn't say is filled from what we sent, because the caller's next line is
+ * rendering this and a hole where `disposition` should be renders as nothing.
+ */
+function asResolution(
+  body: unknown,
+  wire: { action_id: string; affordance_id: string; disposition: string; source: string },
+  alreadyResolved: boolean,
+): AffordanceResolution {
+  const parsed = parseToolEvent(body);
+  if (parsed?.phase === "action") {
+    return alreadyResolved ? { ...parsed.data, alreadyResolved: true } : parsed.data;
+  }
+  const flat = (body ?? {}) as Record<string, unknown>;
+  const s = (v: unknown) => (typeof v === "string" && v ? v : undefined);
+  return {
+    affordanceId: s(flat.affordance_id) ?? wire.affordance_id,
+    actionId: s(flat.action_id) ?? wire.action_id,
+    disposition: s(flat.disposition) ?? wire.disposition,
+    status: s(flat.status),
+    source: s(flat.source) ?? wire.source,
+    ...(alreadyResolved ? { alreadyResolved: true } : {}),
+    raw: body,
+  };
 }
 
 /** Payload of the `avatar-ready` event. */
@@ -1071,6 +1157,13 @@ export class WhissleAgent {
       } else if (tool.phase === "progress") {
         this.settleThinking(this.thinking.progress(tool.data));
         this.emit("tool-progress", tool.data satisfies ToolProgress);
+      } else if (tool.phase === "action") {
+        // A pending action being resolved, not a tool running: no earcon and no
+        // `thinking` edge — nothing new is in flight, something already decided.
+        // The event fires whichever surface did the deciding (a tap here, a spoken
+        // "send it", the operator's inbox), which is why a card's buttons hang off
+        // it rather than off the local tap handler.
+        this.emit("affordance-resolved", tool.data satisfies AffordanceResolution);
       } else {
         // Only a FAILURE carries a cue here — a success is about to be narrated by the
         // agent, so a chime on every result would turn the bank into wallpaper.
@@ -1450,6 +1543,138 @@ export class WhissleAgent {
   }
 
   /**
+   * Fire one of a card's affordances — the tap behind its buttons.
+   *
+   * A tool that defers its side effect (the drafted email, the tentative booking)
+   * ships the choices on its result card as `ToolFinished.affordances`; this is how
+   * a page fires one. Everything it takes is read straight off the `Affordance`:
+   *
+   *   const a = (card as ToolFinished).affordances?.[0]; // from a tool-finished event
+   *   await agent.fireAffordance({
+   *     actionId: a.actionId,
+   *     affordanceId: a.id,
+   *     disposition: a.kind === "reject" ? "reject" : "approve",
+   *   });
+   *
+   * Two doors, chosen by whether a voice session is live — the same split every
+   * other channel in this SDK makes:
+   *
+   *   • **During a live session** it goes over the data channel (a `card-action`
+   *     client message) and the promise resolves when the pipeline's own
+   *     `affordance-resolved` confirmation comes back — or rejects after 10 s,
+   *     because the channel drops rather than throws and a promise that can hang
+   *     forever is worse than one that says so. The card may still resolve after
+   *     that rejection: keep listening to `affordance-resolved`.
+   *
+   *   • **With no session up** it POSTs `/api/embed/card-action` with the session
+   *     token, and resolves with the mirrored resolution.
+   *
+   * **A 409 resolves, it does not reject.** It means some other surface — another
+   * tab, a spoken "send it", the operator's inbox — resolved this action first, and
+   * the body carries the standing state. That is an answer, not an error: the
+   * returned resolution is flagged `alreadyResolved: true` and should be rendered
+   * exactly as if the firing had been yours. Races are settled server-side (first
+   * write wins), which is what makes a card on two screens at once safe.
+   *
+   * Every successful firing (409 included) is ALSO emitted as `affordance-resolved`,
+   * so a card renderer needs exactly one code path whatever fired it.
+   */
+  async fireAffordance(opts: FireAffordanceOptions): Promise<AffordanceResolution> {
+    const wire = {
+      action_id: opts.actionId,
+      affordance_id: opts.affordanceId,
+      disposition: opts.disposition,
+      source: opts.source || "tap",
+    };
+    if (this._state === "connected") return this.fireOverChannel(wire);
+
+    const session = await this.ensureSession();
+    let res: Response;
+    try {
+      res = await fetch(`${this.opts.baseUrl}/api/embed/card-action`, {
+        method: "POST",
+        credentials: "omit",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: session.token, ...wire }),
+      });
+    } catch (err) {
+      throw new WhissleTextError(0, err instanceof Error ? err.message : "Network error.");
+    }
+    if (res.ok || res.status === 409) {
+      // 200 mirrors the resolution event; 409 carries the standing state. Both are
+      // answers — see the method comment for why a 409 must not become an error toast.
+      let body: unknown = null;
+      try {
+        body = await res.json();
+      } catch {
+        /* resolved with no readable body — fall back to what we sent */
+      }
+      const resolution = asResolution(body, wire, res.status === 409);
+      this.emit("affordance-resolved", resolution);
+      return resolution;
+    }
+    const { code, message } = cardActionFailure(res.status, await detailOf(res));
+    this.fail(message, code, res.status);
+    throw new WhissleTextError(res.status, message);
+  }
+
+  /**
+   * The live-session door: say it on the data channel, then wait for the pipeline's
+   * own resolution to come back around. The wait is the honest part — `send` drops
+   * rather than throws, so resolving optimistically would report firings that never
+   * left the browser.
+   */
+  private fireOverChannel(wire: {
+    action_id: string;
+    affordance_id: string;
+    disposition: string;
+    source: string;
+  }): Promise<AffordanceResolution> {
+    return new Promise<AffordanceResolution>((resolve, reject) => {
+      const onResolved: Handler = (payload) => {
+        const r = payload as AffordanceResolution;
+        // Ours if it names our affordance — or, from a server that omitted the
+        // affordance id, our action row.
+        const ours =
+          r?.affordanceId === wire.affordance_id ||
+          (!r?.affordanceId && r?.actionId === wire.action_id);
+        if (!ours) return;
+        cleanup();
+        resolve(r);
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(
+          new Error(
+            "The action wasn't confirmed in time. It may still land — `affordance-resolved` will say.",
+          ),
+        );
+      }, CARD_ACTION_TIMEOUT_MS);
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.off("affordance-resolved", onResolved);
+      };
+      this.on("affordance-resolved", onResolved);
+      this.send("card-action", wire);
+    });
+  }
+
+  /**
+   * The session token for a tokened HTTP call, minting a fresh session when we hold
+   * none — or hold one past its TTL. The re-mint rule is `sessionExpired`'s: a
+   * caller-supplied static token is never declared dead, because we could not
+   * replace it and a maybe-working request beats a definitely-failing one.
+   */
+  private async ensureSession(): Promise<WhissleSessionInfo> {
+    if (this._session && !this.sessionExpired()) return this._session;
+    this._session = null;
+    const session = await this.mintSession();
+    this._session = session;
+    this._sessionMintedAt = Date.now();
+    return session;
+  }
+
+  /**
    * The text door for this agent, minting a session if we don't already have one.
    *
    * The mint DESCRIBES where text turns go (`transport.text.connect`), so follow that
@@ -1466,11 +1691,8 @@ export class WhissleAgent {
     if (this.textChannel) {
       this.pendingThread = this.textChannel.thread ?? this.pendingThread;
       this.textChannel = null;
-      this._session = null;
     }
-    const session = this._session ?? (await this.mintSession());
-    this._session = session;
-    this._sessionMintedAt = Date.now();
+    const session = await this.ensureSession();
     if (session.text_enabled === false) {
       throw new WhissleTextError(
         404,

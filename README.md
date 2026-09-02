@@ -225,7 +225,7 @@ await agent.start();   // asks for the mic, checks it, connects
 
 ### Typing an event payload
 
-`on()` is one signature for 26 events, so **TypeScript hands every payload to
+`on()` is one signature for 28 events, so **TypeScript hands every payload to
 your handler as `unknown`** — `(payload?: unknown, detail?: unknown) => void`.
 The Payload column in [Events](#events) is what arrives at *runtime*, and it is
 accurate; it is not what the compiler infers. Cast at the handler boundary, using
@@ -360,7 +360,8 @@ to go silent for seconds at a time with no explanation:
 | `thinking` | `{ active, tool?, label? }` | one boolean for "it's working, that's why it's quiet". Collapses however many tools are in flight into a single edge each way, and clears when the agent starts speaking. This is what a "thinking strip" hangs off. |
 | `tool-started` | `ToolStarted` — `{ id?, name?, arguments?, sound?, raw }` | the agent called a tool. The SDK plays the earcon itself; `sound` is exposed so you can do your own. |
 | `tool-progress` | `ToolProgress` — `{ id?, name?, display?, data?, raw }` | an interim line from inside a long tool ("Reading source 2 of 3…"). `display` is written to be shown as-is. |
-| `tool-finished` | `ToolFinished` — `{ id?, name?, ok?, result?, evidence?, sound?, raw }` | it came back. `ok` is `undefined` — not `false` — when the tool didn't say, so its success is genuinely unknown. `evidence` carries citations when it answered from a document. `sound` is set **only on failure**: the agent is about to speak the answer, so a chime on every success would turn the bank into wallpaper. |
+| `tool-finished` | `ToolFinished` — `{ id?, name?, ok?, result?, evidence?, sound?, affordances?, raw }` | it came back. `ok` is `undefined` — not `false` — when the tool didn't say, so its success is genuinely unknown. `evidence` carries citations when it answered from a document. `sound` is set **only on failure**: the agent is about to speak the answer, so a chime on every success would turn the bank into wallpaper. `affordances` is the card's actionable buttons, when the tool deferred its side effect — see [Card affordances](#card-affordances). |
+| `affordance-resolved` | `AffordanceResolution` — `{ id?, affordanceId?, actionId?, disposition?, status?, source?, alreadyResolved?, raw }` | a card's pending action was resolved — approved or rejected — from **any** surface: a tap here, a spoken confirmation, the operator's console. Drive card buttons off this, not off your tap handler. See [Card affordances](#card-affordances). |
 | `gist` | `string` | a one-line caption of the reply being spoken right now. Only on agents configured to emit one. |
 | `user-metadata` | `UserMetadata` | the live acoustic read of the caller — see [Emotion](#emotion-and-the-neutral-problem) before you render it. **Not emitted at all** when neither an emotion nor an intent survived the read; the raw payload still reaches `server-message`. |
 | `signal` | `LiveSignal` | one event from the pipeline's live signal stream (barge-in, endpointing, language switches, entities, flow state). The stream is versioned and additive-only, so a future schema arrives as the same fields plus ones this build ignores — `signal.version` if you care, `signal.raw` for the rest. |
@@ -500,6 +501,96 @@ JSON body. The SSE envelope (`open` → `delta`* → `done`) lives on the
 authenticated `/api/chat` route, which a browser holding a publishable key cannot
 call and should not be able to. `sendText` resolves once, with the whole reply —
 a fake stream that arrives all at once would be a worse lie than no stream.
+
+## Card affordances
+
+Some tools don't act — they **prepare**. The email is drafted, the booking is
+tentative, and the side effect waits in a pending-actions queue for someone to
+say yes. Such a tool ships the choices on its result card as
+`ToolFinished.affordances`: buttons, described by the platform, that fire that
+pending action.
+
+```ts
+import type { ToolFinished } from "@whissle/agents";
+
+agent.on("tool-finished", (payload) => {
+  const card = payload as ToolFinished;
+  for (const a of card.affordances ?? []) {
+    // Render a button labelled `a.label`. On tap:
+    void agent.fireAffordance({
+      actionId: a.actionId,
+      affordanceId: a.id,
+      disposition: a.kind === "reject" ? "reject" : "approve",
+    });
+  }
+});
+```
+
+Each affordance is `{ id, label, kind, actionId, primary? }`. `kind` is
+`"approve"` (fire the pending action), `"reject"` (discard it), or `"choice"`
+(pick-one — several on a card, tapping one approves that variant, which is why a
+`choice` is *fired* with `disposition: "approve"`). At most one affordance per
+card is `primary` — the default target for a voice or gesture confirmation. A
+card with no `affordances` is exactly what it always was: render-only. The field
+appears on **both** doors — the voice data channel and `sendText`'s
+`turn.toolEvents` — parsed by the same code.
+
+**The outcome is an event, not a return value — and that is the design.** The
+same affordance can be fired by a tap here, a spoken confirmation, or the
+operator's own console, and every one of those lands on the session's live
+channel as `affordance-resolved`:
+
+```ts
+import type { AffordanceResolution } from "@whissle/agents";
+
+agent.on("affordance-resolved", (payload) => {
+  const r = payload as AffordanceResolution;
+  // r.actionId / r.affordanceId say which card; r.disposition is "approve" or
+  // "reject"; r.source says which modality fired it ("tap" | "voice" | "gesture").
+  render(r.disposition === "reject" ? "Discarded" : "Approved · sent");
+});
+```
+
+Drive your card's buttons off this event, **not** off your own tap handler —
+otherwise a firing from another surface leaves your card offering a choice that
+no longer exists.
+
+**`fireAffordance` routes itself.** During a live voice session it goes over the
+session's data channel and resolves when the pipeline's own confirmation comes
+back around (or rejects after 10 s — the channel drops rather than throws, and a
+promise that can hang forever is worse than one that says so; the card can still
+resolve later via the event). With no session up it POSTs the token-authed
+card-action endpoint and resolves with the mirrored resolution. Same call either
+way.
+
+**A 409 resolves — it does not reject.** An affordance fires *once*, and races
+are settled server-side: first write wins, everyone else is told the standing
+state. `fireAffordance` hands that state back flagged `alreadyResolved: true`,
+and it should be rendered exactly as if the firing had been yours:
+
+```ts
+const r = await agent.fireAffordance({
+  actionId: "act_123",
+  affordanceId: "aff_456",
+  disposition: "approve",
+});
+if (r.alreadyResolved) {
+  // Someone — another tab, another modality, another person — got there first.
+  // `r` is the card's real state. Render it; never toast an error for it.
+}
+```
+
+Every successful firing (409 included) is **also** emitted as
+`affordance-resolved`, so a card renderer needs exactly one code path whatever
+fired it.
+
+**The ready-made widget does all of this.** A card with affordances renders its
+buttons in the log — the approve filled with the accent, the reject quiet, so
+"yes" is findable without reading. A tap disables the row immediately (a
+double-tap must not fire twice), the resolution swaps the buttons for a line
+("Approved · sent" / "Discarded"), and a resolution arriving from any other
+surface does the same. A firing that fails to *send* re-arms the buttons; a
+firing that was merely beaten renders the winner's outcome.
 
 ## Errors
 
@@ -861,7 +952,7 @@ in Node (ESM or CJS) is safe. Note the SDK still needs a browser to actually
 ## Testing
 
 ```bash
-npm test              # 245 cases across 17 files, Vitest, no browser needed
+npm test              # 293 cases across 18 files, Vitest, no browser needed
 npm run typecheck     # src and tests, --strict, --skipLibCheck false
 npm run check:readme  # every TypeScript snippet in this file, compiled against src/
 ```
@@ -872,7 +963,9 @@ for, the mic preflight and its severity split, the audio-only path when an avata
 mint fails), the transcript/turn de-duplication, and the wire formats: the
 outbound `client-message` envelope, the earcon clip-name guard and bank fallback,
 the tool-event parse, the thinking bookkeeping, the `NEUTRAL` suppression, the
-signal envelope's forward compatibility, and the text channel's thread key.
+signal envelope's forward compatibility, the text channel's thread key, and the
+card-affordance surface (the parse on both doors, both firing routes, the
+409-is-an-answer rule, and the widget's card state machine).
 
 `npm run check:readme` exists because this README is API surface: a snippet a
 reader pastes first and that does not compile is a bug report from someone who
@@ -914,8 +1007,9 @@ a published one):
 - **The mobile playout graph.** The node graph and its values are pinned against a
   fake context. Whether it is actually louder on an iPhone is a phone question —
   `window.__whissleAudioBoost()` reports the live measurement from the device.
-- **The widget's DOM.** The copy rules are unit-tested; the rendered markup is not
-  (there is no DOM environment in the suite).
+- **The widget's DOM.** The copy rules and the card-affordance state machine
+  (tap-disables-once, resolution-from-any-surface, fail-re-arms) are unit-tested;
+  the rendered markup is not (there is no DOM environment in the suite).
 
 ## License
 

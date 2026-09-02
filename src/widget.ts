@@ -1,5 +1,10 @@
 import { normalizeAvatar } from "./avatar";
-import { WhissleAgent, type WhissleAgentOptions } from "./WhissleAgent";
+import type { Affordance, AffordanceResolution, ToolFinished } from "./tool-events";
+import {
+  WhissleAgent,
+  type FireAffordanceOptions,
+  type WhissleAgentOptions,
+} from "./WhissleAgent";
 
 export interface WidgetOptions extends WhissleAgentOptions {
   /** Header label shown above the widget. */
@@ -64,9 +69,23 @@ const CSS = `
 .wa-say{flex:1;min-width:0;border:1px solid #e3e8e4;border-radius:12px;padding:10px 12px;font:inherit;
  font-size:14px;background:#fff;color:inherit}
 .wa-say:focus{outline:2px solid var(--wa-accent);outline-offset:-1px}
+/* A tool card with pending actions — the same bubble an agent line gets, plus a
+   button row. Approve is filled with the accent, reject stays quiet: the visitor
+   should be able to find "yes" without reading. */
+.wa-card{align-self:flex-start;max-width:85%;background:#f1f4ef;border-radius:12px;
+ border-bottom-left-radius:4px;padding:8px 11px;font-size:14px;line-height:1.45}
+.wa-card-t{white-space:pre-wrap;word-break:break-word}
+.wa-acts{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+.wa-act{border:1px solid #d6ded5;background:#fff;color:#14201a;border-radius:10px;
+ padding:7px 12px;font-size:13px;font-weight:600;cursor:pointer;transition:opacity .15s}
+.wa-act.fill{background:var(--wa-accent);border-color:var(--wa-accent);color:#fff}
+.wa-act:disabled{opacity:.5;cursor:default}
+.wa-resolved{display:block;margin-top:8px;font-size:12px;color:#6b7a70}
 @media(prefers-color-scheme:dark){.wa-w{background:#151e19;border-color:#26302a;color:#eaf1ea}
  .wa-hd,.wa-ft,.wa-think{border-color:#26302a}.wa-agent{background:#1b241f}
- .wa-icon,.wa-say{background:#151e19;border-color:#26302a;color:#a7b5ab}}
+ .wa-icon,.wa-say{background:#151e19;border-color:#26302a;color:#a7b5ab}
+ .wa-card{background:#1b241f}.wa-act{background:#151e19;border-color:#26302a;color:#a7b5ab}
+ .wa-act.fill{background:var(--wa-accent);border-color:var(--wa-accent);color:#fff}}
 `;
 
 /** Render a ready-made voice widget into `target`. Returns the WhissleAgent so
@@ -133,6 +152,79 @@ export function mount(target: string | HTMLElement, options: WidgetOptions): Whi
     log.appendChild(el);
     log.scrollTop = log.scrollHeight;
   };
+
+  // ── actionable cards ─────────────────────────────────────────────────────────
+  //
+  // A tool that deferred its side effect ships the choices on its result card
+  // (`ToolFinished.affordances`); the widget renders them as buttons and fires the
+  // tapped one. The buttons are DISABLED the moment one is tapped and swapped for a
+  // resolved line on `affordance-resolved` — which arrives whatever surface did the
+  // resolving, this widget included, because `fireAffordance` emits it too. A race
+  // (two tabs, a spoken "send it" mid-tap) is safe by construction: the server takes
+  // the first write and answers the rest 409 with the standing state, which
+  // `fireAffordance` resolves — never rejects — so the card renders the outcome
+  // instead of an error.
+  const cardRows: Array<{ row: AffordanceRow; paint: () => void }> = [];
+  agent
+    .on("tool-finished", (payload) => {
+      const card = payload as ToolFinished;
+      if (!card.affordances?.length) return;
+      hint?.remove();
+      const row = new AffordanceRow(card.affordances);
+      const el = document.createElement("div");
+      el.className = "wa-card";
+      const title = document.createElement("div");
+      title.className = "wa-card-t";
+      title.textContent = cardTitle(card);
+      el.appendChild(title);
+      const acts = document.createElement("div");
+      acts.className = "wa-acts";
+      el.appendChild(acts);
+      const paint = () => {
+        acts.textContent = "";
+        const v = row.view;
+        if (v.state === "resolved") {
+          const line = document.createElement("span");
+          line.className = "wa-resolved";
+          line.textContent = v.line;
+          acts.appendChild(line);
+          return;
+        }
+        for (const b of v.buttons) {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = b.filled ? "wa-act fill" : "wa-act";
+          btn.textContent = b.label;
+          btn.disabled = v.disabled;
+          btn.addEventListener("click", () => {
+            const fire = row.tap(b.id);
+            if (!fire) return;
+            paint(); // disabled immediately — a double-tap must not fire twice
+            agent.fireAffordance(fire).catch(() => {
+              // The firing never landed (network, channel timeout). Re-arm the
+              // buttons — unless a resolution arrived meanwhile, which `fail()`
+              // respects. The error bar above is already showing the sentence.
+              row.fail();
+              paint();
+            });
+          });
+          acts.appendChild(btn);
+        }
+      };
+      paint();
+      cardRows.push({ row, paint });
+      log.appendChild(el);
+      log.scrollTop = log.scrollHeight;
+    })
+    .on("affordance-resolved", (payload) => {
+      const r = payload as AffordanceResolution;
+      for (const c of cardRows) {
+        if (c.row.resolve(r)) {
+          c.paint();
+          break;
+        }
+      }
+    });
 
   // ── the session ceiling ──────────────────────────────────────────────────────
   //
@@ -337,6 +429,100 @@ function working(tool?: string): string {
   return `${ing.charAt(0).toUpperCase()}${ing.slice(1)}${rest ? ` ${rest}` : ""}…`;
 }
 
+/** What one of a card's buttons should look like. */
+export interface AffordanceButtonView {
+  id: string;
+  label: string;
+  /** Filled with the accent (an approve, or a `choice` marked primary); everything
+   *  else — every reject — stays quiet, so "yes" is findable without reading. */
+  filled: boolean;
+}
+
+/** What the card's action row should render right now. */
+export type AffordanceRowView =
+  | { state: "open" | "fired"; buttons: AffordanceButtonView[]; disabled: boolean }
+  | { state: "resolved"; line: string };
+
+/**
+ * The state machine behind a card's buttons, kept apart from the DOM so it can be
+ * tested where the DOM cannot be (the suite runs in Node).
+ *
+ * The rules it pins are exactly the contract's integrity rules, seen from a screen:
+ * a tap disables the row immediately (an affordance fires ONCE, so a double-tap
+ * must not fire twice); a resolution from ANY surface ends the row for good (`fail`
+ * cannot re-open it); and the first resolution wins (a second is reported
+ * unchanged, so a mirrored 409 arriving after the event repaints nothing).
+ */
+export class AffordanceRow {
+  private fired = false;
+  private line: string | null = null;
+
+  constructor(private readonly affordances: Affordance[]) {}
+
+  get view(): AffordanceRowView {
+    if (this.line !== null) return { state: "resolved", line: this.line };
+    return {
+      state: this.fired ? "fired" : "open",
+      disabled: this.fired,
+      buttons: this.affordances.map((a) => ({
+        id: a.id,
+        label: a.label,
+        filled: a.kind === "approve" || (a.kind === "choice" && a.primary === true),
+      })),
+    };
+  }
+
+  /** A tap. Returns what to fire — or `null` when the row is already spent, which is
+   *  the double-tap and the tap-after-resolution both answered in one place. */
+  tap(id: string): FireAffordanceOptions | null {
+    if (this.fired || this.line !== null) return null;
+    const a = this.affordances.find((x) => x.id === id);
+    if (!a) return null;
+    this.fired = true;
+    return {
+      actionId: a.actionId,
+      affordanceId: a.id,
+      disposition: a.kind === "reject" ? "reject" : "approve",
+      source: "tap",
+    };
+  }
+
+  /** The firing never landed. Re-arm — unless a resolution arrived meanwhile, in
+   *  which case the row stays resolved: the outcome outranks our delivery failure. */
+  fail(): void {
+    if (this.line === null) this.fired = false;
+  }
+
+  /** A resolution from any surface. `true` when it was this card's and changed it. */
+  resolve(r: AffordanceResolution): boolean {
+    if (this.line !== null) return false;
+    const mine = this.affordances.some(
+      (a) => a.id === r.affordanceId || a.actionId === r.actionId,
+    );
+    if (!mine) return false;
+    this.line = resolvedLine(r.disposition);
+    return true;
+  }
+}
+
+/** The resolved state, as one line. Total over dispositions this build has never
+ *  heard of — an unknown one must land on honest copy, never on `undefined`. */
+function resolvedLine(disposition?: string): string {
+  if (disposition === "reject") return "Discarded";
+  if (disposition === "approve") return "Approved · sent";
+  return "Resolved";
+}
+
+/** The line above a card's buttons: the card's own display sentence when the tool
+ *  wrote one, else a readable version of the tool's name. Total, like `working` —
+ *  the platform invents tools at runtime and nobody wrote copy for this one. */
+function cardTitle(card: ToolFinished): string {
+  const display = (card.result as { _display?: unknown } | undefined)?._display;
+  if (typeof display === "string" && display.trim()) return display;
+  const words = (card.name ?? "").replace(/[_-]+/g, " ").trim();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : "The agent prepared an action.";
+}
+
 /** `125` → `"2:05"`. Floors at zero rather than ever counting negative — a clock
  *  that reads "-0:03" says the widget lost track, which is worse than "0:00". */
 function formatRemaining(seconds: number): string {
@@ -352,5 +538,13 @@ function sessionEnded(reason?: string | null): string {
     : "This session reached its time limit.";
 }
 
-/** Exported for tests — the copy rules are worth pinning, the DOM around them isn't. */
-export const WIDGET_INTERNALS = { working, formatRemaining, sessionEnded };
+/** Exported for tests — the copy rules and the card state machine are worth pinning,
+ *  the DOM around them isn't. */
+export const WIDGET_INTERNALS = {
+  working,
+  formatRemaining,
+  sessionEnded,
+  resolvedLine,
+  cardTitle,
+  AffordanceRow,
+};
