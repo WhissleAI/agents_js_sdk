@@ -111,6 +111,49 @@ describe("a text turn", () => {
     expect(turn.toolEvents).toEqual([CARD_PARSED]);
   });
 
+  it("keeps every tool_events card verbatim — affordances, evidence, and fields it has never heard of", async () => {
+    // The card contract: whatever the gateway put on a card reaches the renderer.
+    // Parsed fields are read forgivingly, and `raw` is the untouched envelope, so a
+    // field this build does not model (`sound`, `affordances[].hint`, a future
+    // `layout`) is never lost between the wire and the page. Pinned because a
+    // parser that "cleans up" a card is how a card silently loses its buttons.
+    const rich = {
+      ...CARD,
+      tool_call_id: "call-2",
+      function_name: "draft_email",
+      sound: "error_0",
+      ok: false,
+      affordances: [
+        { id: "aff_1", label: "Send", kind: "approve", action_id: "act_1", primary: true, hint: "unknown field" },
+        { id: "aff_2", label: "Discard", kind: "reject", action_id: "act_1" },
+      ],
+      evidence: [{ document_id: "d9", quote: "…", page: 4 }],
+      layout: { columns: 2 },
+    };
+    const fetchImpl = vi.fn(async () => jsonResponse({ ...OK, tool_events: [CARD, rich] }));
+    const c = new TextChannel("https://gw.test/x", "tok", "sess-1", fetchImpl);
+    const turn = await c.send("email them");
+    expect(turn.toolEvents).toHaveLength(2);
+    expect(turn.toolEvents[0]).toEqual(CARD_PARSED);
+    const second = turn.toolEvents[1];
+    expect(second).toMatchObject({
+      id: "call-2",
+      name: "draft_email",
+      ok: false,
+      sound: "error_0",
+      evidence: rich.evidence,
+      affordances: [
+        { id: "aff_1", label: "Send", kind: "approve", actionId: "act_1", primary: true },
+        { id: "aff_2", label: "Discard", kind: "reject", actionId: "act_1" },
+      ],
+    });
+    // Nothing the wire said is gone: the envelope survives byte-for-byte on `raw`,
+    // and each button keeps its own untouched wire object.
+    expect(second.raw).toEqual(rich);
+    expect(second.affordances?.[0].raw).toEqual(rich.affordances[0]);
+    expect((second.raw as Record<string, unknown>).layout).toEqual({ columns: 2 });
+  });
+
   it("answers an empty toolEvents for a gateway that doesn't send the field yet", async () => {
     const { tool_events: _omitted, ...older } = OK;
     const fetchImpl = vi.fn(async () => jsonResponse(older));

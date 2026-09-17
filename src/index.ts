@@ -15,8 +15,19 @@ export {
   type GestureEvent,
   type GestureName,
 } from "./gestures";
+export {
+  listen,
+  ListenSession,
+  type ListenConnectInfo,
+  type ListenEvent,
+  type ListenOptions,
+  type ListenTranscript,
+} from "./listen";
+export { type TranscriptMeta } from "./livekit";
 export { checkMicrophone, listMicrophones, type MicProblem } from "./mic";
 export {
+  turnIdOf,
+  type EntityDisagreement,
   type LiveSignal,
   type Reading,
   type UserMetadata,

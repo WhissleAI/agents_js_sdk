@@ -40,7 +40,13 @@ export interface SessionCallbacks {
    * on a long reply means the screen sits still for several seconds and then jumps.
    */
   onBotWord: (word: string) => void;
-  onUserTranscript: (text: string, final: boolean) => void;
+  /**
+   * The caller's words. `meta` is the frame's own bookkeeping: `turnId` is the
+   * `turn_id` the gateway stamps on every FINAL `user-transcription`, and the
+   * emotion/intent signals for that utterance carry the same one. Optional so
+   * a transport that has no such field (or an older gateway) still fits.
+   */
+  onUserTranscript: (text: string, final: boolean, meta?: TranscriptMeta) => void;
   /** The VAD heard the caller start. The barge-in edge: if the bot is speaking, this
    *  is the moment it is being interrupted. */
   onUserStartedSpeaking: () => void;
@@ -48,6 +54,20 @@ export interface SessionCallbacks {
   onRemoteAudioTrack: (track: MediaStreamTrack) => void;
   onServerMessage: (data: unknown) => void;
   onError: (message: string) => void;
+}
+
+/** What rides alongside a transcript's text. */
+export interface TranscriptMeta {
+  /** The utterance's id, when the gateway stamped one. Finals always carry it. */
+  turnId?: string;
+  /** The frame's `data`, untouched. */
+  raw: unknown;
+}
+
+/** The `turn_id` on a transcription frame — a non-empty string, or nothing. */
+export function transcriptMeta(data: Record<string, unknown>): TranscriptMeta {
+  const id = data.turn_id;
+  return { ...(typeof id === "string" && id ? { turnId: id } : {}), raw: data };
 }
 
 const RTVI_LABEL = "rtvi-ai";
@@ -230,7 +250,7 @@ export class LiveKitSession {
         cb.onBotWord(String(data.text ?? ""));
         break;
       case RTVIMessageType.USER_TRANSCRIPTION:
-        cb.onUserTranscript(String(data.text ?? ""), Boolean(data.final));
+        cb.onUserTranscript(String(data.text ?? ""), Boolean(data.final), transcriptMeta(data));
         break;
       case RTVIMessageType.USER_STARTED_SPEAKING:
         cb.onUserStartedSpeaking();

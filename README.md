@@ -325,7 +325,7 @@ The voice basics:
 | `bot-ready` | object | the agent's pipeline is up and listening |
 | `disconnected` | — | session ended |
 | `speaking-started` / `speaking-stopped` | — | agent turn boundaries |
-| `user-transcript` | `string` | a finalized user utterance |
+| `user-transcript` | `string`, `TranscriptMeta` | a finalized user utterance. The handler's **second** argument is `{ turnId?, raw }` — `turnId` is the utterance's `turn_id`, the same one the `signal` events for it carry, so a transcript and the read of how it was said sit on one clock. See [Listen sessions](#listen-sessions). |
 | `user-interim` | `string` | the caller's speech while still being recognised — provisional, replaced by the next one and finally by `user-transcript`. Render it greyed/italic; never store it. Without it a speaker sees nothing while they talk and assumes they aren't heard. |
 | `agent-transcript` | `string` | the agent's reply, once per turn, when it stops speaking |
 | `agent-partial` | `string` | the reply **so far** in this turn, re-emitted as each sentence lands. What to render mid-answer — `agent-transcript` fires at the end, so a transcript built from it alone sits empty and then dumps a paragraph. |
@@ -365,7 +365,7 @@ to go silent for seconds at a time with no explanation:
 | `gesture` | `GestureEvent` — `{ name, armed_state }` | the gesture engine moved (only ever with `gestures: true`): `"armed"` (👍/👎 could fire the focused card — show an indicator), `"paused"` (a held ✋, 30 s), `"fired"` (`name` says which gesture), `"disarmed"`. See [Gesture input](#gesture-input-opt-in). |
 | `gist` | `string` | a one-line caption of the reply being spoken right now. Only on agents configured to emit one. |
 | `user-metadata` | `UserMetadata` | the live acoustic read of the caller — see [Emotion](#emotion-and-the-neutral-problem) before you render it. **Not emitted at all** when neither an emotion nor an intent survived the read; the raw payload still reaches `server-message`. |
-| `signal` | `LiveSignal` | one event from the pipeline's live signal stream (barge-in, endpointing, language switches, entities, flow state). The stream is versioned and additive-only, so a future schema arrives as the same fields plus ones this build ignores — `signal.version` if you care, `signal.raw` for the rest. |
+| `signal` | `LiveSignal` | one event from the pipeline's live signal stream (barge-in, endpointing, language switches, entities, flow state). Emotion/intent signals carry `turnId` (the utterance they are about), `wordsPerMinute`, `speechMs` and, when the metadata head tagged an entity the transcript lacks, `entityDisagreements`. The stream is versioned and additive-only, so a future schema arrives as the same fields plus ones this build ignores — `signal.version` if you care, `signal.raw` for the rest. |
 | `demo-limit` | `unknown` | this session hit the anonymous demo cap and is ending |
 
 Correlate tool events by `id` (`tool_call_id`), never by `name` — two calls to the
@@ -459,7 +459,8 @@ turned `strict` off.
 Images can ride along on the HTTP path:
 `sendText(text, { images: ["data:image/png;base64,…"] })`.
 
-**Tool cards render one way.** A typed turn's tools produce the same structured
+**Tool cards render one way — `turn.toolEvents` is the card contract, the same
+one voice ships.** A typed turn's tools produce the same structured
 cards a spoken one does — the table a lookup returned, the booking confirmation,
 the citation list — in the *same* `{kind:"tool", phase:"result", …}` envelope the
 voice pipeline ships on the data channel. `toolEvents` carries them parsed into
@@ -468,7 +469,9 @@ one as a `tool-finished` event before the `agent-transcript`, so whatever your
 page renders for a voice tool call renders for a typed one with no second code
 path. No earcon and no `thinking` edge on this path, deliberately: both exist to
 explain a silence that is still happening, and by the time the HTTP turn resolves
-there is nothing left to wait for.
+there is nothing left to wait for. Nothing on a card is dropped on the way
+through: `evidence`, `affordances`, and any field this build has never heard of
+are all on each card's `raw`, byte-for-byte as the gateway sent them.
 
 **Resuming a thread.** Consecutive messages continue one conversation on their own.
 To pick it up again on a *later page load*, persist `agent.textThread` and hand it
@@ -784,6 +787,58 @@ Two consequences worth knowing before you build a UI on this:
   need to tell them apart, count the raw messages on
   [`server-message`](#events), which still receives every one of them.
 
+## Listen sessions
+
+Sometimes nobody should answer. A listen session is the visitor speaking and the
+platform **transcribing and reading the delivery** — emotion, intent, pace, the
+entities the ear may have dropped — with no agent reply, no tool calls, no
+greeting. Coaching overlays, live-commerce copilots, intake forms that fill
+themselves in while the caller talks.
+
+Your server starts one with `@whissle/sdk` (`whissle.listen.start(agentId)`,
+scope `sessions:write`) and hands the page the `{ url, token }` it returns. The
+page joins with `listen()`:
+
+```ts
+import { listen, type ListenTranscript, type LiveSignal } from "@whissle/agents";
+
+const info = await fetch("/api/listen").then((r) => r.json()); // your server → whissle.listen.start(agentId)
+const session = listen(info);                                  // { url, token, room }
+
+session.on("transcript", (payload) => {
+  const t = payload as ListenTranscript;                       // { text, final, turnId?, raw }
+  if (t.final) show(`${t.turnId}: ${t.text}`);
+});
+session.on("signal", (payload) => {
+  const s = payload as LiveSignal;                             // turnId, wordsPerMinute, speechMs, …
+  if (s.type === "emotion" && s.turnId) showLeaning(String((s.data as { label?: string })?.label ?? ""));
+});
+session.on("disconnected", () => showRetry());
+
+// later
+session.close();
+```
+
+**`turnId` is the point.** Every final `transcript` carries the gateway's
+`turn_id`, and the emotion/intent `signal` events for that utterance carry the
+*same* one — so "what was said" and "how it was said" line up by id, not by
+arrival order, which on a busy channel is wrong more often than it looks.
+Interims (`final: false`) have no `turnId`; the gateway only stamps finals.
+
+Events: `connected`, `transcript`, `signal`, `user-metadata` (the acoustic read —
+the [NEUTRAL rule](#emotion-and-the-neutral-problem) applies), `server-message`
+(everything, untouched), `disconnected`, `error`. Controls: `mute()`,
+`unmute()`, `setMicrophone(deviceId)`, `close()`; options `{ deviceId?, muted? }`.
+The platform ends the session on its own when the caller stops for long enough,
+at the agent's cap, or on an error — the session's `end_reason` in your history
+says which.
+
+Deliberately not a `WhissleAgent`: that class owns a bot — greeting handshakes,
+speaking edges, tool cards, an avatar — and none of it applies. A listen session
+is a small emitter of exactly the events it can honestly deliver. It rides the
+same LiveKit room a voice session does, so the `livekit-client` chunk loads
+lazily here too; the lean `<script>` build needs the `.full.global.js` variant.
+
 ## Talking to the running agent
 
 Some behaviour is your application's, not the SDK's: pausing an interview,
@@ -1025,7 +1080,7 @@ in Node (ESM or CJS) is safe. Note the SDK still needs a browser to actually
 ## Testing
 
 ```bash
-npm test              # 332 cases across 19 files, Vitest, no browser needed
+npm test              # 356 cases across 20 files, Vitest, no browser needed
 npm run typecheck     # src and tests, --strict, --skipLibCheck false
 npm run check:readme  # every TypeScript snippet in this file, compiled against src/
 ```

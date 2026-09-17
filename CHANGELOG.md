@@ -4,6 +4,42 @@ All notable changes to `@whissle/agents`. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html); while the major
 version is `0`, a minor bump may carry a breaking change and will say so here.
 
+## 0.8.0 — 2026-09-16
+
+Listen sessions, and one clock for a transcript and its signals. Everything is
+additive; no 0.7.x call changes behaviour.
+
+### Added
+
+- **`listen(info, opts?)`** → `ListenSession` — join a listen room from the
+  `{ url, token, room }` your server got from `@whissle/sdk`'s
+  `whissle.listen.start(agentId)`. The visitor speaks, the platform transcribes
+  and reads the delivery, and no agent answers. Events: `connected`,
+  `transcript` (`ListenTranscript` — `{ text, final, turnId?, raw }`, interims
+  and finals), `signal` (`LiveSignal`), `user-metadata`, `server-message`,
+  `disconnected`, `error`. Controls `mute()` / `unmute()` /
+  `setMicrophone(deviceId)` / `close()`; options `{ deviceId?, muted? }`. Bot-side
+  frames are ignored rather than rendered as a phantom agent. Rides the same
+  lazy `livekit-client` chunk as the LiveKit transport.
+- **`turnId` on transcripts and signals.** Every final `user-transcription`
+  frame carries the gateway's `turn_id`, and the emotion/intent signal frames
+  for the same utterance carry the same one. `LiveSignal` and `UserMetadata`
+  gain `turnId?`; the `user-transcript` / `user-interim` handlers get a second
+  argument, `TranscriptMeta` (`{ turnId?, raw }`), with the string payload
+  unchanged. `turnIdOf(message)` is exported for anyone parsing by hand.
+- **Delivery fields on `LiveSignal`**: `wordsPerMinute?`, `speechMs?` and
+  `entityDisagreements?: { label, kind }[]` (entities the metadata head tagged
+  that the transcript lacks), read forgivingly from the signal's `data` with the
+  envelope as a fallback. Absent — never zero — when the frame has none.
+
+### Tests
+
+- A regression pinning the card contract on typed turns: every `tool_events`
+  card survives `sendText` verbatim — `affordances` (with each button's own
+  wire object), `evidence`, and fields this build has never heard of — on
+  `raw`, and each is re-emitted as `tool-finished` before the reply.
+- 356 cases across 20 files (was 332 / 19).
+
 ## 0.7.0 — 2026-09-01
 
 Card affordances, P0 + P2. Some tools don't act — they **prepare**: the drafted

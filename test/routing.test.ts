@@ -318,3 +318,32 @@ describe("the reply, as it happens", () => {
     expect(p.of("listening-started")).toHaveLength(1);
   });
 });
+
+describe("user-transcript carries the frame's turn_id", () => {
+  it("hands turnId as the handler's second argument, with the text still first", () => {
+    // Additive on purpose: the payload has always been the string, and every handler
+    // in the wild reads it that way. The frame's bookkeeping rides alongside so a
+    // page can line a transcript up with the `signal` events for the same utterance.
+    const p = new Probe();
+    const seen: Array<[unknown, unknown]> = [];
+    p.on("user-transcript", (text, meta) => seen.push([text, meta]));
+    p.on("user-interim", (text, meta) => seen.push([text, meta]));
+    p.cb.onUserTranscript("I'd like", false, { raw: { text: "I'd like", final: false } });
+    p.cb.onUserTranscript("I'd like a refund", true, {
+      turnId: "turn_7",
+      raw: { text: "I'd like a refund", final: true, turn_id: "turn_7" },
+    });
+    expect(seen).toEqual([
+      ["I'd like", { raw: { text: "I'd like", final: false } }],
+      ["I'd like a refund", { turnId: "turn_7", raw: { text: "I'd like a refund", final: true, turn_id: "turn_7" } }],
+    ]);
+  });
+
+  it("still works for a transport that passes no meta", () => {
+    const p = new Probe();
+    const seen: unknown[] = [];
+    p.on("user-transcript", (text) => seen.push(text));
+    p.cb.onUserTranscript("hello", true);
+    expect(seen).toEqual(["hello"]);
+  });
+});
