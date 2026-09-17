@@ -61,8 +61,20 @@ export interface UserMetadata {
   emotion?: Reading;
   /** What the caller appears to want. No fallback-value problem — reported as sent. */
   intent?: Reading;
+  /**
+   * The utterance this reading belongs to — the same `turn_id` the final
+   * `user-transcript` for that utterance carries, when the pipeline stamped one.
+   * How a listen session puts the transcript and its signals on one clock.
+   */
+  turnId?: string;
   /** The untouched payload, including `age`, `gender` and the raw `probs` map. */
   raw: unknown;
+}
+
+/** An entity the metadata head tagged that the transcript does not contain. */
+export interface EntityDisagreement {
+  label: string;
+  kind: string;
 }
 
 /** One event from the pipeline's live signal stream (schema v1). */
@@ -84,6 +96,23 @@ export interface LiveSignal {
   outcome?: string;
   /** The event's own payload. Shape depends on `type`. */
   data?: unknown;
+  /**
+   * The utterance this signal is about. Every final `user-transcription` frame
+   * carries a `turn_id`, and the emotion/intent signal frames for that utterance
+   * carry the same one — so a consumer can put a transcript line and the read
+   * of how it was said on one clock without guessing from arrival order. Read
+   * from the envelope or from `data`, whichever the gateway stamped.
+   */
+  turnId?: string;
+  /** Speaking rate for the utterance, computed on every ear (Deepgram included). */
+  wordsPerMinute?: number;
+  /** How long the caller actually spoke, in milliseconds. */
+  speechMs?: number;
+  /**
+   * Entities the metadata head tagged that the transcript lacks — present only
+   * when the two disagree. A hint that the ear dropped a name or a number.
+   */
+  entityDisagreements?: EntityDisagreement[];
   /**
    * The envelope's schema version. `1` today.
    *
@@ -133,6 +162,40 @@ function reading(
   };
 }
 
+/**
+ * The `turn_id` on a frame, wherever the gateway put it. Frames stamp it on the
+ * envelope; some put it inside `data` next to the fields it describes. Either
+ * spelling is the same id, and an empty string is no id at all.
+ */
+export function turnIdOf(message: unknown): string | undefined {
+  if (!message || typeof message !== "object") return undefined;
+  const m = message as Record<string, unknown>;
+  if (typeof m.turn_id === "string" && m.turn_id) return m.turn_id;
+  const d = m.data;
+  if (d && typeof d === "object") {
+    const inner = (d as Record<string, unknown>).turn_id;
+    if (typeof inner === "string" && inner) return inner;
+  }
+  return undefined;
+}
+
+function finiteNumber(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+
+/** `entity_disagreements`, read forgivingly: an entry missing either field is dropped. */
+function parseDisagreements(raw: unknown): EntityDisagreement[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: EntityDisagreement[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const o = item as Record<string, unknown>;
+    if (typeof o.label !== "string" || !o.label) continue;
+    out.push({ label: o.label, kind: typeof o.kind === "string" ? o.kind : "" });
+  }
+  return out.length ? out : undefined;
+}
+
 /** Read a `{t:"user-metadata"}` payload, or `null` if that isn't what this is. */
 export function parseUserMetadata(message: unknown): UserMetadata | null {
   if (!message || typeof message !== "object") return null;
@@ -142,7 +205,8 @@ export function parseUserMetadata(message: unknown): UserMetadata | null {
   const intent = reading(m.intent, m.probs, "intent", false);
   // Nothing usable in it — don't wake a consumer up to hand them two undefineds.
   if (!emotion && !intent) return null;
-  return { emotion, intent, raw: message };
+  const turnId = turnIdOf(message);
+  return { emotion, intent, ...(turnId ? { turnId } : {}), raw: message };
 }
 
 /**
@@ -168,9 +232,23 @@ export function parseSignal(message: unknown): LiveSignal | null {
   const m = message as Record<string, unknown>;
   if (m.kind !== "signal" || typeof m.type !== "string") return null;
   if (typeof m.v !== "number" || !Number.isFinite(m.v) || m.v < 1) return null;
+  // The per-utterance delivery fields ride inside `data` on the emotion/intent
+  // signals (and on any other signal the gateway chooses to stamp). Read from
+  // there, with the envelope as a fallback, so a gateway that lifts them a
+  // level does not silently blank them.
+  const d = (m.data && typeof m.data === "object" ? m.data : {}) as Record<string, unknown>;
+  const turnId = turnIdOf(message);
+  const wordsPerMinute = finiteNumber(d.words_per_minute) ?? finiteNumber(m.words_per_minute);
+  const speechMs = finiteNumber(d.speech_ms) ?? finiteNumber(m.speech_ms);
+  const entityDisagreements =
+    parseDisagreements(d.entity_disagreements) ?? parseDisagreements(m.entity_disagreements);
   return {
     type: m.type,
     version: m.v,
+    ...(turnId ? { turnId } : {}),
+    ...(wordsPerMinute !== undefined ? { wordsPerMinute } : {}),
+    ...(speechMs !== undefined ? { speechMs } : {}),
+    ...(entityDisagreements ? { entityDisagreements } : {}),
     subsystem: typeof m.subsystem === "string" ? m.subsystem : undefined,
     seq: typeof m.seq === "number" ? m.seq : undefined,
     tMs: typeof m.t_ms === "number" ? m.t_ms : undefined,

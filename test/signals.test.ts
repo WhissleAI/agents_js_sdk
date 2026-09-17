@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseSignal, parseUserMetadata } from "../src/signals";
+import { parseSignal, parseUserMetadata, turnIdOf } from "../src/signals";
 
 /**
  * The honesty tests.
@@ -149,5 +149,66 @@ describe("the live signal stream", () => {
     for (const m of [null, undefined, "x", { kind: "tool", phase: "started" }, { v: 1 }]) {
       expect(parseSignal(m)).toBeNull();
     }
+  });
+});
+
+describe("turn_id: one clock for the transcript and its signals", () => {
+  // Every final `user-transcription` carries a `turn_id`, and the emotion/intent
+  // signals for the same utterance carry the same one. Without it a consumer lines
+  // the two up by arrival order, which on a busy channel is wrong more often than
+  // it looks.
+  it("reads turn_id from the envelope", () => {
+    const s = parseSignal({ kind: "signal", v: 1, type: "emotion", turn_id: "turn_7", data: {} });
+    expect(s?.turnId).toBe("turn_7");
+  });
+
+  it("reads turn_id from inside data when the gateway put it there", () => {
+    const s = parseSignal({ kind: "signal", v: 1, type: "intent", data: { turn_id: "turn_8" } });
+    expect(s?.turnId).toBe("turn_8");
+  });
+
+  it("does not invent one — absent and empty are both absent", () => {
+    expect(parseSignal({ kind: "signal", v: 1, type: "barge_in" })).not.toHaveProperty("turnId");
+    expect(parseSignal({ kind: "signal", v: 1, type: "barge_in", turn_id: "" })).not.toHaveProperty("turnId");
+    expect(turnIdOf(null)).toBeUndefined();
+    expect(turnIdOf({ turn_id: 12 })).toBeUndefined();
+  });
+
+  it("reads the per-utterance delivery fields off an emotion/intent signal", () => {
+    const s = parseSignal({
+      kind: "signal",
+      v: 1,
+      type: "emotion",
+      turn_id: "turn_7",
+      data: {
+        label: "ANGRY",
+        words_per_minute: 168,
+        speech_ms: 2400,
+        entity_disagreements: [
+          { label: "PSA-12345", kind: "cert_id" },
+          { kind: "no label — dropped" },
+          "garbage",
+        ],
+      },
+    });
+    expect(s).toMatchObject({
+      turnId: "turn_7",
+      wordsPerMinute: 168,
+      speechMs: 2400,
+      entityDisagreements: [{ label: "PSA-12345", kind: "cert_id" }],
+    });
+  });
+
+  it("leaves the delivery fields absent (not zero) when the frame has none", () => {
+    const s = parseSignal({ kind: "signal", v: 1, type: "emotion", data: { label: "HAPPY", words_per_minute: "fast" } });
+    expect(s).not.toHaveProperty("wordsPerMinute");
+    expect(s).not.toHaveProperty("speechMs");
+    expect(s).not.toHaveProperty("entityDisagreements");
+  });
+
+  it("stamps user-metadata with its turn_id too", () => {
+    const m = parseUserMetadata({ t: "user-metadata", intent: "INTENT_BOOKING", turn_id: "turn_3" });
+    expect(m?.turnId).toBe("turn_3");
+    expect(parseUserMetadata({ t: "user-metadata", intent: "INTENT_BOOKING" })).not.toHaveProperty("turnId");
   });
 });

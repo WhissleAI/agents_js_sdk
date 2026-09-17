@@ -9,7 +9,7 @@ import {
 } from "./avatar";
 import { EarconPlayer, type EarconOptions } from "./earcons";
 import { GestureEngine, type GestureEngineHooks } from "./gestures";
-import { LiveKitSession, type LiveKitConnectInfo, type SessionCallbacks } from "./livekit";
+import { LiveKitSession, transcriptMeta, type LiveKitConnectInfo, type SessionCallbacks } from "./livekit";
 import { checkMicrophone, listMicrophones, type MicProblem } from "./mic";
 import { BoostedPlayout } from "./mobile-audio";
 import { parseSignal, parseUserMetadata } from "./signals";
@@ -1136,8 +1136,13 @@ export class WhissleAgent {
       onBotWord: (word) => {
         if (word) this.emit("agent-word", word);
       },
-      onUserTranscript: (text, final) => {
-        this.emit(final ? "user-transcript" : "user-interim", text);
+      onUserTranscript: (text, final, meta) => {
+        // The text stays the payload — it always was, and every handler reads it
+        // that way. The frame's bookkeeping (`turnId`, the raw frame) rides as the
+        // handler's SECOND argument, so a page that wants to line a transcript up
+        // with the `signal` events for the same utterance can, and one that never
+        // looked past the string sees nothing new.
+        this.emit(final ? "user-transcript" : "user-interim", text, meta);
       },
       onUserStartedSpeaking: () => this.emit("listening-started"),
       onUserStoppedSpeaking: () => this.emit("listening-stopped"),
@@ -1332,8 +1337,8 @@ export class WhissleAgent {
           if (participant?.local) return;
           if (track.kind === "audio") cb.onRemoteAudioTrack(track);
         },
-        onUserTranscript: (data: { text: string; final?: boolean }) =>
-          cb.onUserTranscript(data.text, Boolean(data.final)),
+        onUserTranscript: (data: { text: string; final?: boolean; turn_id?: string }) =>
+          cb.onUserTranscript(data.text, Boolean(data.final), transcriptMeta(data)),
         onUserStartedSpeaking: cb.onUserStartedSpeaking,
         onUserStoppedSpeaking: cb.onUserStoppedSpeaking,
         // Word-level, as the TTS says it. Separate from `bot-output` on purpose —
