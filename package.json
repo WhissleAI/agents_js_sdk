@@ -51,7 +51,11 @@
     "embed",
     "sdk",
     "voice-agents",
-    "conversational-ai"
+    "conversational-ai",
+    "speech-to-text",
+    "asr",
+    "transcription",
+    "stt"
   ],
   "publishConfig": {
     "access": "public"
