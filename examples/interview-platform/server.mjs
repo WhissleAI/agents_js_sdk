@@ -1,5 +1,5 @@
 /**
- * A small but complete Whissle application, server side. About 200 lines.
+ * A small but complete Whissle application, server side. Under 300 lines.
  *
  * It does the four things every real integration does, and nothing else:
  *
@@ -28,15 +28,17 @@ const here = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4000);
 
 /** The published version to fall back to when this copy has no local SDK build.
- *  Kept as a MAJOR.MINOR range so a patch release is picked up without an edit. */
-const SDK_VERSION = "0.5";
+ *  Kept as a MAJOR.MINOR range so a patch release is picked up without an edit.
+ *  Track the last PUBLISHED minor, not this repo's version — the fallback has to
+ *  resolve on the CDN today, and a repo bump lands on npm later. */
+const SDK_VERSION = "0.7";
 
 const apiKey = process.env.WHISSLE_API_KEY;
 if (!apiKey) {
   console.error(
     "\n  Set WHISSLE_API_KEY to a workspace secret key (wsk_…).\n" +
       "  Create one at whissle.ai → Settings → API keys, with scopes:\n" +
-      "  agents:read agents:write kb:read kb:write calls:read\n",
+      "  agents:read agents:write kb:write calls:read embed:mint\n",
   );
   process.exit(1);
 }

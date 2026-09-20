@@ -3,13 +3,14 @@
 Four agents, live voice calls with or without a face, and every past session with
 its transcript and score — and the browser never holds a Whissle key.
 
-It doubles as the **reference for everything `@whissle/agents` can do**: one page
-wiring every event the SDK emits, so "what does `tool-finished` look like" has an
+It doubles as a **broad reference for `@whissle/agents`**: one page wiring most
+of the events the SDK emits (not `connecting`, `affordance-resolved` or
+`gesture`), so "what does `tool-finished` look like" has an
 answer you can watch rather than read.
 
 ```bash
 npm install
-export WHISSLE_API_KEY=wsk_live_…      # whissle.ai → Settings → API keys
+export WHISSLE_API_KEY=wsk_…           # whissle.ai → Settings → API keys
 npm start                              # http://localhost:4000
 ```
 
@@ -63,7 +64,7 @@ The server's job ends once the token is issued. Media never passes through it.
 | | |
 |---|---|
 | **`agents.json`** | Every agent the app owns. Editing this file is how you change the app. |
-| **`server.mjs`** | ~200 lines. Provisions agents, mints session tokens, reads sessions back. Holds the secret key. |
+| **`server.mjs`** | Under 300 lines. Provisions agents, mints session tokens, reads sessions back. Holds the secret key. |
 | **`index.html`** | One page, three views. Runs the conversation with `@whissle/agents`. Holds nothing. |
 
 ### `agents.json`
@@ -337,7 +338,7 @@ prompt and what your app shows cannot drift apart.
 | **Hangs on connecting, no error** | Almost always ICE. Don't hard-code ICE or TURN — use what the mint returns. |
 | **`402`** | The workspace is out of credit. `whissle usage`. |
 | **`403 … missing required scope`** | Scopes are fixed when a key is created. Mint a new one. |
-| **Avatar never appears** | Needs `@whissle/agents` ≥ 0.3.1, and the container must exist *before* `start()`. |
+| **Avatar never appears** | Needs `@whissle/agents` ≥ 0.5.0 (what this page is written against), and the container must exist *before* `start()`. |
 | **`Failed to resolve module specifier`** | The import map didn't load. It must come *before* the module script, and the page must be served over HTTP — opening `index.html` from the filesystem won't work. |
 | **The agent replies but there is no cue** | Tool sounds are unchecked, or the agent is set to `tool_sounds: "call"` (the cue is mixed into the audio server-side instead, and the SDK stays out of the way). |
 | **Microphone refused** | `localhost` is a secure context; a LAN IP is not. Serve over HTTPS to test from a phone. |
