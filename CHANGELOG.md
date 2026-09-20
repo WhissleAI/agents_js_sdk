@@ -4,6 +4,97 @@ All notable changes to `@whissle/agents`. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html); while the major
 version is `0`, a minor bump may carry a breaking change and will say so here.
 
+## 0.9.0 — 2026-09-20
+
+Whissle's own metadata speech-to-text, driven from a browser — and a round of
+corrections where this SDK's documentation disagreed with the platform.
+Everything is additive; no 0.8.x call changes behaviour.
+
+### Added
+
+- **`transcribe(options)`** → `TranscriptionStream` — stream the microphone to
+  Whissle's ASR engine and get transcripts back with the metadata heads
+  attached (emotion, intent, entity, age, gender, dialect, behavior, eval,
+  role). No agent, no room, no LiveKit. Events: `open`, `transcript`
+  (`Transcript`), `message` (every engine event, untouched), `warning`,
+  `error`, `close`. Controls: `mute()`, `unmute()`, `flush()`, `stop()`.
+  Options: `url` (string or function), `language`, `metadataTags`, `hotwords`,
+  `hotwordWeight`, `deviceId`, and `config` as an escape hatch for engine flags
+  this build has never heard of.
+
+  **You supply the URL, and it must not be Whissle's.** A publishable (`wpk_`)
+  key can never open the ASR socket: the scope is `models:invoke` and a
+  publishable key is capped to `{sessions:write, embed:mint, chat:invoke,
+  agents:read}`, with the cap applied at authentication rather than only at
+  mint. The only credential the door accepts is a `wsk_` workspace secret, and
+  there is no short-lived stand-in to mint — no ASR equivalent of
+  `POST /api/embed/session-token` exists. So `url` should point at a WebSocket
+  endpoint on your own server, which holds the `wsk_` and relays. A URL
+  carrying a `wsk_` throws, on both the literal and the function form.
+
+  What the SDK owns is the browser's half: the microphone graph, resampling to
+  the 16 kHz mono int16 PCM the engine requires, the config frame, the flush,
+  and typed events. `floatTo16BitPCM`, `downsampleTo16k`, `buildConfigFrame`
+  and `parseTranscript` are exported for anyone doing their own plumbing.
+
+  **Billed per second of audio** to the workspace whose key your server used,
+  for as long as the socket is open.
+
+  Deliberately **not** named `listen()`: this SDK already has one, and it opens
+  a LiveKit room for an agent listen session. The gateway's `/listen` WebSocket
+  is the `transcribe()` feature. Both docs now say so.
+
+- **`SendTextOptions.context`** — ephemeral per-turn grounding, up to 16,000
+  characters. Composed under the agent's own prompt and knowledge base, so it
+  is extra grounding rather than a prompt override, and **not** stored on the
+  thread: it never reaches history, recap or memory. The right place for a
+  large rolling block (a livestream's state, the page being viewed) that would
+  otherwise accumulate in the conversation forever. The field has existed on
+  `POST /api/embed/chat/turn` and was simply unreachable from the browser. An
+  empty string is omitted rather than sent as a blank block.
+
+### Fixed
+
+- **The `simli-token` 404 message described two impossible causes.** It said
+  "unknown avatar" or "this agent has no avatar configured"; neither can
+  happen — an unrecognised code is passed through as a raw provider face id,
+  and a missing one falls back to a default. A 404 means a code the catalog
+  knows that has no face for the active provider, which is what it now says.
+
+- **"A browser holding a publishable key cannot call a streaming route"** was
+  false as stated, in `src/text.ts` and the README. Two doors were conflated:
+  `/api/chat` (the companion route) needs `companion:invoke`, which a `wpk_`
+  genuinely cannot hold — but `POST /api/agents/{id}/chat/turn/stream` takes
+  `chat:invoke`, which is inside the publishable cap. Both now say which is
+  which, and that this SDK does not wrap the reachable one yet.
+
+### Documented, not fixed
+
+- **`avatar: "CODE"` does not choose the face.** The gateway resolves the
+  avatar configured on the agent row and ignores the code off the wire, on
+  purpose, so an embed cannot silently start paying for Simli minutes nobody
+  configured. Worse: an agent with **no** avatar configured gets a face that
+  never moves — the SDK renders a head and fires `avatar-ready`, but the bot is
+  never switched into client-render mode and so never emits the frames that
+  drive the lips. Configure the avatar on the agent, not only in code. The fix
+  belongs on the gateway side; the option doc and README now warn.
+
+- `/asr/translate` and `/asr/s2s` are deliberately not reachable with a
+  workspace key and are not wrapped. They compose ASR with a language model and
+  those legs have no per-second price, so a workspace key there would be an
+  unbilled door.
+
+### Tests
+
+- 44 new cases. The ASR ones pin the refusal first — a `wsk_` in the URL, from
+  a literal and from a function — then the int16 clamping (an unclamped sample
+  over 1.0 wraps negative and arrives as a click), the resampling ratio, the
+  config frame including the empty-`metadataTags` case, the parser against the
+  engine's real field names, and the flush / warning / close routing.
+- **400 cases across 21 files** (was 356 / 20).
+- The bundle-size table is re-measured; the entry grew ~7.2 KB gzip across
+  0.6.0–0.9.0 and `transcribe()` pulls in no dependency.
+
 ## 0.8.0 — 2026-09-16
 
 Listen sessions, and one clock for a transcript and its signals. Everything is
