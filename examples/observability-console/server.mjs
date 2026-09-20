@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4100);
 const BASE_URL = process.env.WHISSLE_BASE_URL || "https://aws-gateway-backend.whissle.ai/bot";
-const SDK_VERSION = "0.5";
+const SDK_VERSION = "0.7";
 const RECORDINGS = join(here, "sessions");
 
 /** One log file per run of the page, opened on the first event. */
@@ -45,7 +45,8 @@ if (!apiKey) {
   console.error(
     "\n  Set WHISSLE_API_KEY to a workspace secret key (wsk_…), or point\n" +
       "  WHISSLE_KEY_FILE at a file containing WHISSLE_API_KEY=…\n" +
-      "  Create one at whissle.ai → Settings → API keys (scopes: agents:read).\n",
+      "  Create one at whissle.ai → Settings → API keys\n" +
+      "  (scopes: agents:read, plus embed:mint to mint the browser's session token).\n",
   );
   process.exit(1);
 }

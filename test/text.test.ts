@@ -272,6 +272,32 @@ describe("a text turn", () => {
     await c.send("what is this part?", { images: ["data:image/png;base64,AAAA"] });
     expect(bodies[0].images).toEqual(["data:image/png;base64,AAAA"]);
   });
+
+  it("sends per-turn `context` grounding when there is any", async () => {
+    // A big rolling block the agent should answer against, composed UNDER the
+    // agent's own prompt and never stored on the thread (routes/embed.py:862-870).
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetchImpl = vi.fn(async (_u: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return jsonResponse(OK);
+    });
+    const c = new TextChannel("https://gw.test/x", "tok", undefined, fetchImpl);
+    await c.send("what is on screen?", { context: "viewers: 412\nitem: SKU-42" });
+    expect(bodies[0].context).toBe("viewers: 412\nitem: SKU-42");
+  });
+
+  it("omits `context` entirely rather than sending an empty grounding block", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetchImpl = vi.fn(async (_u: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return jsonResponse(OK);
+    });
+    const c = new TextChannel("https://gw.test/x", "tok", undefined, fetchImpl);
+    await c.send("hello", { context: "" });
+    await c.send("hello again");
+    expect(bodies[0]).not.toHaveProperty("context");
+    expect(bodies[1]).not.toHaveProperty("context");
+  });
 });
 
 describe("why it failed", () => {

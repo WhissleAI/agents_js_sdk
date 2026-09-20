@@ -357,7 +357,11 @@ describe("avatar options", () => {
     expect(agent.webrtcCalls[0]).not.toContain("avatar_render");
   });
 
-  it("names an unknown avatar code in the failure, not a bare status", async () => {
+  it("says what a simli-token 404 actually means, naming the code", async () => {
+    // It does NOT mean "unknown code": services/avatar_catalog.resolve_avatar
+    // passes an unrecognised code through as a raw provider face id rather than
+    // refusing it, and the backend falls back to a default when none is given. A
+    // 404 is a code the catalog knows that has no face for the active provider.
     routeFetch({ ...sessionOnly, "/bot/api/embed/simli-token": () => jsonResponse({}, 404) });
     const agent = new TestAgent({
       apiKey: "wpk_a",
@@ -368,7 +372,7 @@ describe("avatar options", () => {
     const failures: string[] = [];
     agent.on("avatar-failed", (m) => failures.push(String(m)));
     await agent.start();
-    expect(failures[0]).toMatch(/Unknown avatar "deborah"/);
+    expect(failures[0]).toMatch(/"deborah" has no face for the active avatar provider/);
   });
 
   it("fails the whole session when the avatar is required", async () => {

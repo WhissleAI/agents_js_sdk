@@ -12,12 +12,28 @@
 // widget load — so one mint carries a whole conversation, bounded by the token's expiry,
 // the origin binding and a per-token burst limit.
 //
-// Streaming, honestly: this endpoint answers with one JSON body. The SSE envelope
-// (`open` → `delta`* → `done`) lives on the authenticated `/api/chat` route, which a
-// browser holding a publishable key cannot call and should not be able to. So
-// `sendText` resolves once, with the whole reply. When the embed route grows a
-// streaming sibling this is where it will land; until then the SDK does not pretend to
-// stream, because a fake stream that arrives all at once is a worse lie than no stream.
+// Streaming, honestly: THIS endpoint answers with one JSON body, so `sendText`
+// resolves once, with the whole reply. The SDK does not pretend to stream, because a
+// fake stream that arrives all at once is a worse lie than no stream.
+//
+// What is no longer true — and was stated here until 0.9.0 — is that a browser
+// holding a publishable key cannot reach any streaming route at all. Two different
+// doors were being conflated:
+//
+//   /api/chat                          the companion route. Needs `companion:invoke`,
+//                                      which a wpk_ genuinely cannot hold
+//                                      (routes/chat.py:662; the scope is outside
+//                                      PUBLISHABLE_MAX_SCOPES).
+//   /api/agents/{id}/chat/turn/stream  the agent's own turn, narrated as it happens
+//                                      (`open` → `delta`* → `done`). Gated
+//                                      `require_any_scope("agents:write",
+//                                      "chat:invoke")` — routes/agents.py:1840-1847 —
+//                                      and `chat:invoke` IS inside the cap.
+//
+// So a publishable key CAN stream, just not through this session-token door: that
+// route is authorised by the key itself plus an agent id, not by an embed token, and
+// it is a different request shape. Wrapping it is a real gap in this SDK and is
+// tracked as such rather than papered over here.
 
 import { parseToolEvent, type ToolFinished } from "./tool-events";
 
@@ -76,6 +92,21 @@ export interface SendTextOptions {
    * one this channel is already on, so ordinary back-and-forth needs nothing here.
    */
   threadId?: string;
+  /**
+   * Ephemeral grounding for THIS reply only — a large, changing block the agent
+   * should answer against: a livestream's current state, the page the visitor is
+   * looking at, the contents of their cart.
+   *
+   * Composed UNDER the agent's own prompt and knowledge base, so it is additional
+   * grounding and not a prompt override — an agent's configured identity still
+   * leads. It is **not** stored on the thread and never reaches history, recap or
+   * memory, so unlike `message` it is the right place for a big rolling block that
+   * would otherwise poison the conversation's history.
+   *
+   * The gateway bounds it at 16,000 characters so one turn cannot blow the context
+   * window; longer is rejected by the server rather than silently truncated here.
+   */
+  context?: string;
 }
 
 /** Thrown by `sendText`. `code` is the HTTP status, so a caller can branch on it. */
@@ -181,6 +212,9 @@ export class TextChannel {
     const thread = opts.threadId || this.threadKey;
     if (thread) body.session_id = thread;
     if (opts.images?.length) body.images = opts.images;
+    // Sent only when non-empty: an empty string is a field the gateway would
+    // compose into the prompt as a blank grounding block.
+    if (opts.context) body.context = opts.context;
 
     let res: Response;
     try {

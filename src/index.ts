@@ -33,6 +33,19 @@ export {
   type UserMetadata,
 } from "./signals";
 export {
+  buildConfigFrame,
+  downsampleTo16k,
+  floatTo16BitPCM,
+  parseTranscript,
+  transcribe,
+  TranscriptionStream,
+  type MetadataTag,
+  type Transcript,
+  type TranscriptEntity,
+  type TranscribeEvent,
+  type TranscribeOptions,
+} from "./transcribe";
+export {
   WhissleTextError,
   type SendTextOptions,
   type TextImage,

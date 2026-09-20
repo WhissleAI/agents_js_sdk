@@ -153,7 +153,7 @@ export interface WhissleAgentOptions {
   /**
    * Render a talking avatar for this agent.
    *
-   *   avatar: "F1-HR"                       // a code from GET /api/avatars
+   *   avatar: "F1-HR"                       // ASKS for a face; see the caveat below
    *   avatar: true                          // whatever the agent is configured with
    *   avatar: { id: "M2-TL", container: "#face" }
    *
@@ -161,6 +161,21 @@ export interface WhissleAgentOptions {
    * does no video transcoding and the video never makes a second trip. If it
    * can't start, the session still connects audio-only and you get an
    * `avatar-failed` event — unless you set `required: true`.
+   *
+   * ── The face is the AGENT'S, and the agent must have one ────────────────────
+   *
+   * A code passed here does **not** choose the face. The gateway deliberately
+   * resolves the avatar configured on the agent row and ignores the code off the
+   * wire, so that an embed cannot silently start paying for Simli minutes nobody
+   * configured (`pipecat-bot/server.py`, `_shape_for_embed`). Passing a code is
+   * therefore a request for *an* avatar, not for *that* avatar.
+   *
+   * And if the agent has **no** avatar configured, the result today is a face
+   * that never moves: the token mint falls back to a default code, so this SDK
+   * renders a head and fires `avatar-ready`, but the bot is never switched into
+   * client-render mode and so never emits the `simli-audio` frames that drive the
+   * lips. Configure the avatar on the agent (Studio → the agent → Avatar) rather
+   * than only here, and treat a silent talking head as that misconfiguration.
    */
   avatar?: string | boolean | AvatarOptions;
   /**
@@ -1006,11 +1021,17 @@ export class WhissleAgent {
         credentials: "omit",
       });
       if (!res.ok) {
+        // What a 404 here actually means. It is NOT "unknown code" and it is NOT
+        // "this agent has no avatar" — both of those were claimed until 0.9.0 and
+        // neither can happen: the backend falls back to a default code when none is
+        // given, and an unrecognised code is passed through as a raw provider face
+        // id rather than refused (services/avatar_catalog.resolve_avatar). The one
+        // way to get a 404 is a code the catalog DOES know that has no face for the
+        // provider currently in use.
         throw new Error(
           res.status === 404
-            ? wanted.id
-              ? `Unknown avatar "${wanted.id}" — see GET /api/avatars for the codes.`
-              : "This agent has no avatar configured — pass one, e.g. avatar: \"F1-HR\"."
+            ? `The avatar${wanted.id ? ` "${wanted.id}"` : ""} has no face for the ` +
+              "active avatar provider. Pick another — see GET /api/avatars."
             : `Couldn't start the avatar (${res.status}).`,
         );
       }
