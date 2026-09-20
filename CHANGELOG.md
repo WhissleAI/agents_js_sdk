@@ -84,6 +84,28 @@ Everything is additive; no 0.8.x call changes behaviour.
   those legs have no per-second price, so a workspace key there would be an
   unbilled door.
 
+### Examples and docs
+
+- **Both example servers told the reader to create a key that cannot run them.**
+  The scope lists omitted `embed:mint` / `sessions:write`, one of which the
+  embed-session mint requires — so following the setup literally produced a key
+  that 403s on the route the example exists to demonstrate. Fixed in both, and
+  `kb:read` dropped from the interview platform, which never used it.
+- The CDN fallback in both examples pinned `@whissle/agents@0.5`, four minors
+  behind the surface those pages are written against; now `0.7`, the last
+  published minor. `examples/interview-platform` depended on `@whissle/sdk`
+  `^0.3.0`, which on a 0.x range can never resolve the published 0.5.1.
+- `wsk_live_…` corrected to `wsk_` (there is no live/test split), the
+  publishable key pointed at where it is actually created, and `avatar.html`
+  now says its `?key=` fallback must be a publishable key.
+- Four places where example prose disagreed with example code: "every event the
+  SDK emits" (it wires 26 of 29), "~200 lines" (296), "three ways to open a
+  session" (two), and a tool with no reported status reading "unknown" (the
+  renderer prints "ok not reported").
+
+No `wh_` token and no reference to the retired `api.whissle.ai` host remains
+anywhere in this repo.
+
 ### Tests
 
 - 44 new cases. The ASR ones pin the refusal first — a `wsk_` in the URL, from
