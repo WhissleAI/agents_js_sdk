@@ -110,6 +110,15 @@ whatever the agent says.
 
 ## A talking avatar
 
+> **The face is the agent's, and the agent must have one.** A code passed as
+> `avatar` asks for *an* avatar, not for *that* one: the gateway resolves the
+> avatar configured on the agent row and ignores the code off the wire, so an
+> embed cannot silently start paying for Simli minutes nobody configured. And if
+> the agent has **no** avatar configured, today's result is a head that never
+> moves — the SDK renders a face and fires `avatar-ready`, but the bot is never
+> switched into client-render mode, so it never emits the frames that drive the
+> lips. Configure the avatar on the agent in Studio, not only here.
+
 ```ts
 import { WhissleAgent, type AvatarReady } from "@whissle/agents";
 
@@ -459,6 +468,37 @@ turned `strict` off.
 Images can ride along on the HTTP path:
 `sendText(text, { images: ["data:image/png;base64,…"] })`.
 
+### Grounding one turn without poisoning the thread
+
+`context` is a large, changing block the agent should answer against for **this
+reply only** — a livestream's current state, the page the visitor is on, what is
+in their cart:
+
+```ts
+await agent.sendText("is this still in stock?", {
+  context: "viewers: 412\ncurrent item: SKU-42\nstock: 3 left",
+});
+```
+
+It is composed *under* the agent's own prompt and knowledge base, so it is extra
+grounding rather than a prompt override and the agent's configured identity still
+leads. It is **not** stored on the thread and never reaches history, recap or
+memory — which is exactly why it belongs here rather than glued onto `message`,
+where a big rolling block would accumulate in the conversation forever. The
+gateway bounds it at 16,000 characters.
+
+### On streaming
+
+`sendText` resolves once, with the whole reply, because the embed text door
+answers with one JSON body. The SDK does not fake a stream.
+
+A streaming door **does** exist and a publishable key can reach it —
+`POST /api/agents/{id}/chat/turn/stream` takes `chat:invoke`, which is inside the
+publishable cap — but it is authorised by the key plus an agent id rather than by
+a session token, and it is a different request shape. **This SDK does not wrap it
+yet.** (The companion route `/api/chat` is a separate thing and genuinely out of
+reach: it needs `companion:invoke`, which a `wpk_` cannot hold.)
+
 **Tool cards render one way — `turn.toolEvents` is the card contract, the same
 one voice ships.** A typed turn's tools produce the same structured
 cards a spoken one does — the table a lookup returned, the booking confirmation,
@@ -795,6 +835,12 @@ entities the ear may have dropped — with no agent reply, no tool calls, no
 greeting. Coaching overlays, live-commerce copilots, intake forms that fill
 themselves in while the caller talks.
 
+> **Not the same as [`transcribe()`](#speech-to-text-with-no-agent-at-all).** A
+> listen session has an **agent** — the platform records it against one, and your
+> server starts it. `transcribe()` opens a raw PCM WebSocket to the ASR engine
+> with no agent anywhere. Confusingly, the gateway path `/listen` is the
+> `transcribe()` feature, not this one.
+
 Your server starts one with `@whissle/sdk` (`whissle.listen.start(agentId)`,
 scope `sessions:write`) and hands the page the `{ url, token }` it returns. The
 page joins with `listen()`:
@@ -838,6 +884,115 @@ speaking edges, tool cards, an avatar — and none of it applies. A listen sessi
 is a small emitter of exactly the events it can honestly deliver. It rides the
 same LiveKit room a voice session does, so the `livekit-client` chunk loads
 lazily here too; the lean `<script>` build needs the `.full.global.js` variant.
+
+## Speech-to-text, with no agent at all
+
+`transcribe()` streams the microphone to Whissle's own ASR — the metadata
+engine, so a transcript can arrive with emotion, intent and entities attached —
+with no agent, no room and no reply. Live captions, an intake form that fills
+itself in, a coaching overlay.
+
+**It is not `listen()`.** The two are easy to confuse and the platform's own
+naming makes it worse, so:
+
+| | `transcribe()` | `listen()` |
+| --- | --- | --- |
+| What it opens | a WebSocket carrying raw PCM | a LiveKit room |
+| Is there an agent? | no — nothing is configured, nothing answers | yes; the platform records the session |
+| Who starts it | you, with a URL | your server, via `whissle.listen.start(agentId)` |
+| Gateway path | `/listen` **or** `/asr/stream` | `POST /api/agents/{id}/listen/start` |
+
+The gateway's `/listen` WebSocket is the `transcribe()` one. This SDK's
+`listen()` is the other thing. Sorry.
+
+### The credential problem, honestly
+
+**A publishable key cannot open this, and there is no browser-safe token that
+can.** The scope is `models:invoke`; a `wpk_` is capped to
+`{sessions:write, embed:mint, chat:invoke, agents:read}` and the cap is applied
+when the key authenticates, not just when it is minted — so even a key wrongly
+issued with `models:invoke` is refused at the door. The only credential the
+socket accepts is a `wsk_` workspace **secret**, which must never be in a page,
+and unlike a voice session there is no `POST /api/embed/session-token`
+equivalent to mint a short-lived stand-in.
+
+So this helper holds no credential and will not build a Whissle URL for you.
+**You pass a URL, and in production that is a WebSocket endpoint on your own
+server** which holds the `wsk_` and relays to
+`wss://aws-gateway-backend.whissle.ai/listen?token=wsk_…`. Passing a URL with a
+`wsk_` in it throws, the same way a `wsk_` as `apiKey` does.
+
+What the SDK does own is the part that is genuinely the browser's job: opening
+the microphone, resampling to the 16 kHz mono 16-bit PCM the engine requires,
+the config frame, the flush, and typed events instead of `any`.
+
+```ts
+import { transcribe, type Transcript } from "@whissle/agents";
+
+const stream = transcribe({
+  // YOUR server, which holds the wsk_ and relays to Whissle.
+  url: () =>
+    fetch("/api/asr-url", { credentials: "include" })
+      .then((r) => r.json())
+      .then((d) => d.url as string),
+  language: "en",
+  metadataTags: ["emotion", "intent", "entity"],
+});
+
+stream.on("transcript", (payload) => {
+  const t = payload as Transcript;
+  if (t.final) show(`${t.text} ${t.metadata?.emotion ?? ""}`);
+});
+stream.on("warning", (w) => console.warn(w));   // dropped audio; still running
+stream.on("error", (e) => show(String(e)));
+
+// later — this is a cost control, not just tidiness
+stream.stop();
+```
+
+**Streaming is billed per second of audio** to the workspace whose `wsk_` your
+server used. The socket bills for as long as it is open, so `stop()` matters.
+
+### Events and controls
+
+`open`, `transcript` (a `Transcript`), `message` (every engine event, untouched),
+`warning`, `error`, `close`. Controls: `mute()`, `unmute()`, `flush()`, `stop()`.
+
+`warning` is separate from `error` on purpose: the engine reports backpressure —
+it dropped audio because it could not keep up — while the session is still
+running and still billing. Treating that as fatal tears down a working stream;
+ignoring it silently loses words.
+
+`flush()` forces out what the engine is holding without ending the session, for
+a push-to-talk button. `stop()` sends the flush that stops the last utterance
+being lost, and the engine acknowledges before the socket closes.
+
+### Two defaults that will surprise you
+
+**Omitting `metadataTags` asks for every tag**, and `metadataTags: []` asks for
+none — the opposite of what most people assume. Both are forwarded faithfully,
+so an empty array really does suppress metadata.
+
+**Nothing tells you which metadata heads a deployment actually has.**
+`/asr/status` lists models, decoders and vocabulary sizes but no metadata
+categories, and the tag classifier's category list is never exposed over HTTP.
+The smallest English model has no metadata head at all. An unsupported category
+is simply absent from the event, so read what turns up and never promise a user
+emotion unconditionally. The [NEUTRAL rule](#emotion-and-the-neutral-problem)
+applies to whatever does arrive.
+
+Metadata **values are not normalised**: the CTC path emits raw vocabulary tokens
+(`"EMOTION_HAPPY"`) while a loaded tag classifier emits its own label strings.
+Match loosely; don't assume a prefix.
+
+### What it does not cover
+
+`/asr/translate` and `/asr/s2s` — speech translation and speech-to-speech — are
+deliberately **not** reachable with a workspace key and are not wrapped here.
+They compose ASR with a language model, and those legs have no per-second price,
+so a workspace key there would be an unbilled door. The gateway closes such a
+socket with 4003 rather than pretending. That is a deliberate limit, not an
+oversight.
 
 ## Talking to the running agent
 
@@ -1008,24 +1163,23 @@ as a 404 from the session mint, surfaced as an `error` with `code: "not-found"`.
 The avatar and LiveKit renderers are heavy and most pages use neither, so they
 are loaded on demand.
 
-Measured against **0.4.0**, the version actually on npm. (Numbers are exact bytes
-from `gzip -9`; the entry-chunk rows are esbuild `--bundle --splitting --minify`
-over a trivial app that imports `WhissleAgent` and `mount`.)
+Exact bytes from `gzip -9` on the built `dist/`, at the two versions named. (npm
+currently has **0.7.0**; the 0.5.0 column is kept because it is the last release
+the entry-chunk and per-chunk split was measured for.)
 
-| build | 0.4.0 gzip | 0.5.0 gzip | delta |
+| build | 0.5.0 gzip | 0.9.0 gzip | delta |
 |---|---|---|---|
-| your app's entry chunk | 119,527 | **126,736** | **+7,209 B (+7.0 KB)** |
-| avatar chunk (Simli) | 147,662 | 147,662 | — |
-| LiveKit chunk | 142,702 | 142,702 | — |
-| `dist/index.js` (ESM) | 99,886 | 107,223 | +7,337 B |
-| `dist/index.cjs` | 99,938 | 107,293 | +7,355 B |
-| `dist/index.global.js` (`<script>`) | 120,786 | 128,010 | +7,224 B |
-| `dist/index.full.global.js` | 414,022 | 421,284 | +7,262 B |
+| `dist/index.js` (ESM) | 107,223 | **114,425** | +7,202 B |
+| `dist/index.cjs` | 107,293 | **114,557** | +7,264 B |
+| `dist/index.global.js` (`<script>`) | 128,010 | **135,296** | +7,286 B |
+| `dist/index.full.global.js` | 421,284 | **428,678** | +7,394 B |
 
-**+7.0 KB gzip on the entry chunk** buys the whole of 0.5.0: earcons, tool events,
-the live signal stream, the text channel, mic checks and the mobile playout graph.
-The avatar and LiveKit chunks are byte-identical — nothing in this release touched
-them, and neither is downloaded unless you ask for it.
+That ~7.2 KB spans 0.6.0 through 0.9.0: embed parity, card affordances, gestures,
+listen sessions, and `transcribe()`. `transcribe()` itself is ordinary code with
+no dependency — it adds no chunk and pulls nothing in.
+
+The avatar (Simli, ~147 KB) and LiveKit (~142 KB) chunks are still loaded on
+demand and are not in any number above unless you ask for them.
 
 The earcons contribute almost nothing: a handful of oscillator tables and a fetch.
 The mastered clips are *fetched* from whissle.ai's bank at runtime (~18 KB warmed
@@ -1080,7 +1234,7 @@ in Node (ESM or CJS) is safe. Note the SDK still needs a browser to actually
 ## Testing
 
 ```bash
-npm test              # 356 cases across 20 files, Vitest, no browser needed
+npm test              # 400 cases across 21 files, Vitest, no browser needed
 npm run typecheck     # src and tests, --strict, --skipLibCheck false
 npm run check:readme  # every TypeScript snippet in this file, compiled against src/
 ```
@@ -1093,7 +1247,11 @@ outbound `client-message` envelope, the earcon clip-name guard and bank fallback
 the tool-event parse, the thinking bookkeeping, the `NEUTRAL` suppression, the
 signal envelope's forward compatibility, the text channel's thread key, and the
 card-affordance surface (the parse on both doors, both firing routes, the
-409-is-an-answer rule, and the widget's card state machine). Gesture input is
+409-is-an-answer rule, and the widget's card state machine). For `transcribe()`
+it covers the `wsk_` refusal on both the literal and the function-supplied URL,
+the int16 conversion and its clamping, the resampling ratio, the config frame,
+the event parser against the engine's real field names, and the
+flush / warning / close routing. Gesture input is
 covered against a fake recognizer and camera: every arming gate individually,
 confidence + dwell, the closed three-gesture vocabulary, ambiguity-never-fires,
 the open-palm hold, the firing envelope (`source: "gesture"`), the
@@ -1137,6 +1295,14 @@ a published one):
 - **Microphone device switching.** `listMicrophones()` and `setMicrophone()` are
   never exercised against real devices — `getUserMedia` and `enumerateDevices`
   are stubbed throughout.
+- **`transcribe()`'s microphone graph and its socket.** What *is* pinned is
+  everything decidable in Node, and it is the part most likely to be wrong: the
+  `wsk_` refusal (including when the URL arrives from a function), the int16
+  conversion and its clamping, the resampling ratio, the config frame, the event
+  parser against the engine's real field names, and the flush/warning/close
+  routing — all against a fake socket and a fake `AudioContext`. What needs a
+  browser is whether a real `ScriptProcessor` delivers audio the engine actually
+  recognises, and whether a real relay carries it.
 - **Real gesture recognition.** The engine's gates, dwell, semantics and no-op
   paths run against a fake recognizer and a fake camera. MediaPipe's actual
   model — whether a thumbs-up in your lighting scores 0.75 — and the camera
